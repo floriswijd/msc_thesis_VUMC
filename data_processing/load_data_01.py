@@ -40,7 +40,7 @@ conn = psycopg2.connect(
 )
 
 # Define your SQL query to retrieve the first 5 rows from the materialized view
-query = "SELECT * FROM hourly_state_with_vent_outcome;"
+query = "SELECT * FROM hourly_state_with_vent_outcome_6;"
 
 # Use pandas to read the SQL query into a DataFrame
 df = pd.read_sql(query, conn)

@@ -37,6 +37,7 @@ all_columns = df.columns
 flag_columns = [col for col in all_columns if 'flag' in col.lower()]
 non_flag_columns = [col for col in all_columns if col not in flag_columns and col != 'stay_id']
 
+# Forward fill flag columns within each stay_id group
 for col in non_flag_columns:
     df[col] = df.groupby('stay_id')[col].transform('ffill')
 

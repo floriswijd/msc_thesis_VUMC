@@ -12,7 +12,7 @@ conn = psycopg2.connect(
     password=""
 )
 
-query = "SELECT * FROM hourly_state_with_vent_outcome_2;"  # Load a subset for initial analysis
+query = "SELECT * FROM hourly_state_with_vent_outcome_6;"  # Load a subset for initial analysis
 df = pd.read_sql(query, conn)
 conn.close()
 
@@ -74,7 +74,7 @@ rows_after = len(df_clean)
 print(f"Removed {unique_stays_before - unique_stays_after} stay_ids with high flow readings")
 print(f"Rows after high flow filtering: {rows_after}")
 
-output_path = 'preprocessed_data_3.csv'
+output_path = 'preprocessed_data_4.csv'
 df_clean.to_csv(output_path, index=True)
 print(f"Data saved to {output_path}")
 
@@ -95,9 +95,10 @@ for col in non_flag_columns:
 
 
 
-missing_values = df_clean.isnull().sum()
-print("Missing values by column after filling:")
-print(missing_values)
+with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+    missing_values = df_clean.isnull().sum()
+    print("Missing values by column after filling:")
+    print(missing_values)
 
 # Identify columns with less than 34,000 missing values
 important_columns = missing_values[missing_values < 34000].index.tolist()
@@ -106,12 +107,16 @@ print(f"Keeping only columns with fewer than 34,000 missing values: {important_c
 # Create a new DataFrame with only the important columns
 df_reduced = df_clean[important_columns]
 
+output_path = 'preprocessed_data_4_1.csv'
+df_reduced.to_csv(output_path, index=False)
+print(f"Reduced data saved to {output_path}")
+
 # Now drop rows that still have missing values
 df_final = df_reduced.dropna()
 print(f"Rows before final cleaning: {len(df_clean)}")
 print(f"Rows after final cleaning: {len(df_final)}")
 print(f"Columns retained: {len(df_final.columns)} of {len(df_clean.columns)}")
 
-output_path = 'preprocessed_data_reduced_3.csv'
+output_path = 'preprocessed_data_reduced_4.csv'
 df_final.to_csv(output_path, index=False)
 print(f"Reduced data saved to {output_path}")
