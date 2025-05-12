@@ -94,7 +94,6 @@ for col in non_flag_columns:
     df_clean[col] = df_clean.groupby('stay_id')[col].transform('bfill')
 
 
-
 with pd.option_context('display.max_rows', None, 'display.max_columns', None):
     missing_values = df_clean.isnull().sum()
     print("Missing values by column after filling:")
