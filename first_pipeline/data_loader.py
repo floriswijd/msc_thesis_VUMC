@@ -63,8 +63,16 @@ def preprocess_data(df):
     if np.any(np.isnan(rewards)):
         nan_count = np.sum(np.isnan(rewards))
         print(f"⚠️  WARNING: Found {nan_count} NaN values in rewards")
+        # Print statistics about NaN rewards
+        nan_rewards_count = np.sum(np.isnan(rewards))
+        nan_rewards_percentage = 100 * nan_rewards_count / len(rewards)
+        print(f"  - rewards: {nan_rewards_count} NaNs ({nan_rewards_percentage:.2f}%)")
+        #print head of Nan rewards
+        print("Head of rewards with NaN values:")
+        print(rewards[np.isnan(rewards)][:10])
         # Fill NaN rewards with zeros
         rewards = np.nan_to_num(rewards, nan=0.0)
+
 
     return {
         "states": states,

@@ -1,9 +1,9 @@
 alpha: 1.0
 batch_size: 256
-epochs: 200
+epochs: 50
 gamma: 0.99
 learning_rate: 0.001
-policy_match_rate_mean: 0.0034085710685653157
-policy_match_rate_std: 0.04692819449153111
+policy_match_rate_mean: 1.0
+policy_match_rate_std: 0.0
 test_returns_mean: 1.2779946327209473
 test_returns_std: 1.8001993894577026
