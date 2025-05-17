@@ -258,7 +258,7 @@ print(f"📊 Episodes split: train={len(train_eps)}, val={len(val_eps)}, test={l
 
 # ---------- MODEL CONFIGURATION ----------
 # Force CPU usage to avoid CUDA issues
-device = "cpu" if args.gpu < 0 else f"cuda:{args.gpu}"
+device = "mps" if args.gpu < 0 else f"cuda:{args.gpu}"
 print(f"Using device: {device}")
 
 # Create a simpler configuration for initial viability
