@@ -35,34 +35,9 @@ import evaluator   # Model evaluation
 import utils       # Utility functions for debugging and visualization
 
 def main():
-    """
-    Main entry point for HFNC CQL training pipeline.
-    
-    This function orchestrates the entire training workflow:
-    1. Parse command-line arguments
-    2. Set up directories and device configuration
-    3. Load and preprocess HFNC episode data
-    4. Create and split MDP dataset
-    5. Configure and instantiate the CQL model
-    6. Train the model with robust error handling
-    7. Evaluate the model and analyze predictions
-    8. Save model and metrics for future use
-    
-    The function includes extensive error handling and diagnostics
-    to help identify and resolve issues in the pipeline.
-    """
-    # ---------------------------------------------------------------------------
-    # 1. Parse command-line arguments and set up paths
-    # ---------------------------------------------------------------------------
-    args = config.parse_args()  # Get command-line arguments
-    paths = config.setup_paths(args)  # Create necessary directories
-    
-    # ---------------------------------------------------------------------------
-    # 2. Set up computing device (CPU/GPU)
-    # ---------------------------------------------------------------------------
-    # Determine whether to use CPU or GPU based on arguments
-    # Using CPU (-1) can be more stable for debugging purposes
-    device = "cpu"  # Default to CPU for stability
+    args = config.parse_args()
+    paths = config.setup_paths(args)
+    device = "cpu"
     if args.gpu >= 0:
         try:
             import torch
@@ -73,24 +48,12 @@ def main():
                 print("CUDA not available, falling back to CPU")
         except ImportError:
             print("PyTorch CUDA support not available, using CPU")
-    
-    # ---------------------------------------------------------------------------
-    # 3. Load and preprocess data
-    # ---------------------------------------------------------------------------
     print("\n=== Loading and preprocessing data ===")
-    # Load parquet file containing HFNC episodes
     df = data_loader.load_data(args.data)
-    # Load configuration file with hyperparameters
     cfg = config.load_config(args.cfg)
-    # Preprocess data: extract states, actions, rewards, dones
     data_dict = data_loader.preprocess_data(df)
-    
-    # ---------------------------------------------------------------------------
-    # 4. Create MDP dataset and split into train/val/test
-    # ---------------------------------------------------------------------------
     print("\n=== Creating dataset ===")
     try:
-        # Create MDPDataset from preprocessed arrays - this is the full dataset
         mdp_dataset_full = dataset.create_mdp_dataset( # Renamed for clarity
             data_dict["states"],    # State features (observations)
             data_dict["actions"],   # Actions taken by clinicians
@@ -98,38 +61,23 @@ def main():
             data_dict["dones"]      # Episode termination flags
         )
         
-        # Check for data quality issues that might cause NaNs
         utils.debug_nan_values(data_dict["states"], "states")
         utils.debug_nan_values(data_dict["rewards"], "rewards") 
         utils.debug_inf_values(data_dict["states"], "states")
         utils.debug_inf_values(data_dict["rewards"], "rewards")
         
-        # Split dataset into train, validation and test sets (lists of Episode objects)
-        # By default: 70% train, 15% val, 15% test
         train_eps, val_eps, test_eps = dataset.split_dataset(mdp_dataset_full) # Split the full dataset
 
-        # Create a new MDPDataset containing only the training episodes
         if not train_eps:
             print("\n❌ Error: No training episodes after split. Exiting.")
             sys.exit(1)
         train_dataset = dataset.MDPDataset(episodes=train_eps)
 
-        # If you plan to use val_eps with d3rlpy's fit method for early stopping or hyperparameter tuning:
-        # val_dataset = dataset.MDPDataset(episodes=val_eps) if val_eps else None
-        # And then pass val_dataset to model.fit() in trainer.py if supported/needed.
-
     except Exception as e:
         print(f"\n❌ Error creating dataset: {e}")
         sys.exit(1)
-    
-    # ---------------------------------------------------------------------------
-    # 5. Create scaler and model
-    # ---------------------------------------------------------------------------
     print("\n=== Creating model ===")
-    # Create observation scaler for state normalization
-    # The scaler will be fit on the dataset provided to model.fit(), which will be train_dataset
     scaler = model.create_scaler()
-    # Configure CQL algorithm with hyperparameters
     cql_config = model.create_cql_config(
         batch_size=args.batch,    # Batch size for training updates
         learning_rate=args.lr,    # Step size for optimizer
@@ -139,7 +87,6 @@ def main():
     )
     
     try:
-        # Instantiate CQL model with configuration
         cql = model.create_cql_model(
             config=cql_config,
             device=device,         # CPU or specific GPU
@@ -148,12 +95,7 @@ def main():
     except Exception as e:
         print(f"\n❌ Error creating model: {e}")
         sys.exit(1)
-    
-    # ---------------------------------------------------------------------------
-    # 6. Train the model
-    # ---------------------------------------------------------------------------
     print("\n=== Training model ===")
-    # Train model with robust error handling and fallback strategies
     result, errors = trainer.train_model(
         model=cql,                  # CQL model to train
         dataset=train_dataset,      # Pass the training-only dataset
@@ -161,43 +103,20 @@ def main():
         experiment_name=args.logdir # Log directory name
     )
     
-    # If training encountered errors, analyze logs to diagnose issues
     if errors:
         print("\n⚠️ Training encountered errors, checking logs for diagnosis...")
         trainer.check_training_logs(args.logdir)
-    
-    # ---------------------------------------------------------------------------
-    # 7. Evaluate the model
-    # ---------------------------------------------------------------------------
     print("\n=== Evaluating model ===")
-    # Calculate evaluation metrics on test episodes
-    # test_eps is already a list of Episode objects, which is what evaluator.evaluate_model expects
     metrics = evaluator.evaluate_model(cql, test_eps) 
-    # Add training parameters to metrics for complete reporting
     metrics = evaluator.add_training_params_to_metrics(metrics, args)
-    
-    # Perform more detailed analysis of model predictions
     print("\n=== Analyzing predictions ===")
     evaluator.analyze_predictions(cql, test_eps, top_n=3)
-    
-    # ---------------------------------------------------------------------------
-    # 8. Analyze training logs and visualize results
-    # ---------------------------------------------------------------------------
     print("\n=== Analyzing training logs ===")
-    # Check gradient files for issues like NaNs or extreme values
     utils.check_gradient_values(args.logdir)
-    # Create plots from training curves
     utils.plot_training_curves(args.logdir)
-    
-    # ---------------------------------------------------------------------------
-    # 9. Save results
-    # ---------------------------------------------------------------------------
     print("\n=== Saving results ===")
-    # Save evaluation metrics to YAML file
     config.save_metrics(metrics, paths["metric_path"])
-    # Save trained model for future use or deployment
     model.save_model(cql, paths["model_path"])
-    
     print("\n=== Training complete ===")
     
 if __name__ == "__main__":
