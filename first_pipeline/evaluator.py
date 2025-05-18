@@ -184,22 +184,52 @@ def analyze_predictions(model, test_episodes, top_n=5):
             for obs in observations:
                 # If model supports q-values, we can see the confidence in each action
                 # This helps diagnose uncertain predictions
+                
+                # Initialize defaults for current step
+                current_best_action_for_step = -1  # Default if prediction fails
+                current_confidence_for_step = 0.0    # Default confidence
+
                 try:
-                    # Get Q-values for all actions in this state
-                    q_values = model.predict_value(obs.reshape(1, -1))[0]
-                    action = model.predict(obs.reshape(1, -1))[0]
+                    # Get the model's chosen (best) action
+                    current_best_action_for_step = model.predict(obs.reshape(1, -1))[0]
+
+                    # Get Q-values for all actions to calculate confidence
+                    q_values_for_all_actions_list = []
+                    current_obs_batch = obs.reshape(1, -1)  # Prepare observation batch
+
+                    if hasattr(model, 'action_size') and model.action_size is not None:
+                        num_actions = model.action_size
+                        for act_idx in range(num_actions):
+                            # Shape action as (batch_size=1, action_dimensionality=1) for predict_value
+                            action_batch_for_q = np.array([[act_idx]], dtype=np.int64)
+                            q_val = model.predict_value(current_obs_batch, action_batch_for_q)
+                            # q_val is likely a numpy array like array([value]), so use .item()
+                            q_values_for_all_actions_list.append(q_val.item())
+                        
+                        if len(q_values_for_all_actions_list) > 1:
+                            sorted_q_values = np.sort(np.array(q_values_for_all_actions_list))[::-1]
+                            current_confidence_for_step = sorted_q_values[0] - sorted_q_values[1]
+                        # If only 1 action, confidence is typically 0.0 or undefined.
+                        # current_confidence_for_step is already 0.0 by default, covering this.
+                    else:
+                        # model.action_size not available, confidence remains 0.0
+                        print(f"DEBUG: model.action_size not available. Confidence will be 0.0 for this step.")
                     
-                    predicted_actions.append(action)
-                    
-                    # Calculate confidence as difference between best and second best action
-                    # Higher values indicate more confident predictions
-                    if len(q_values) > 1:
-                        sorted_q = np.sort(q_values)[::-1]  # Sort in descending order
-                        confidence = sorted_q[0] - sorted_q[1]
-                        confidence_scores.append(confidence)
+                    predicted_actions.append(current_best_action_for_step)
+                    confidence_scores.append(current_confidence_for_step)
+
                 except Exception as e:
+                    # This 'e' is the exception from predict, predict_value, or the Q-value loop
+                    print(f"DEBUG: Exception during model prediction/Q-value retrieval: {e}")
+                    print(f"DEBUG: Observation causing error: {obs}")
+                    print(f"DEBUG: Observation shape: {obs.shape}, dtype: {obs.dtype}")
+                    if np.isnan(obs).any():
+                        print(f"DEBUG: NaN values found in observation: {obs[np.isnan(obs)]}")
+                    if np.isinf(obs).any():
+                        print(f"DEBUG: Infinite values found in observation: {obs[np.isinf(obs)]}")
+                    
                     predicted_actions.append(-1)  # Marker for failed prediction
-                    confidence_scores.append(0)
+                    confidence_scores.append(0.0) # Default confidence on error
             
             # Calculate statistics
             match_count = sum(a1 == a2 for a1, a2 in zip(predicted_actions, episode_actions))
