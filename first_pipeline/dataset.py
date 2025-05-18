@@ -10,116 +10,124 @@
 # The MDPDataset is a critical component that d3rlpy uses to
 # represent reinforcement learning trajectories as episodes.
 # -----------------------------------------------------------
-from d3rlpy.dataset import MDPDataset
+from d3rlpy.dataset import MDPDataset, Episode # Ensure Episode is imported
 from sklearn.model_selection import train_test_split
+import numpy as np
 
-def create_mdp_dataset(states, actions, rewards, dones):
+def create_mdp_dataset(observations_arr, actions_arr, rewards_arr, dones_arr):
     """
-    Create an MDP dataset from preprocessed arrays.
-    
-    The MDPDataset is the core data structure in d3rlpy that represents
-    reinforcement learning trajectories. It organizes data into episodes
-    based on the 'dones' array which marks episode boundaries.
-    
+    Creates an MDPDataset from numpy arrays, respecting episode boundaries.
+
     Args:
-        states (np.ndarray): Array of state observations with shape (n_steps, state_dim)
-        actions (np.ndarray): Array of actions with shape (n_steps,)
-        rewards (np.ndarray): Array of rewards with shape (n_steps,)
-        dones (np.ndarray): Boolean array indicating episode terminations with shape (n_steps,)
-        
+        observations_arr (np.ndarray): Array of observations.
+        actions_arr (np.ndarray): Array of actions.
+        rewards_arr (np.ndarray): Array of rewards.
+        dones_arr (np.ndarray): Array of done flags (boolean), marking episode ends.
+
     Returns:
-        d3rlpy.dataset.MDPDataset: Dataset containing organized episodes
-        
-    Raises:
-        Exception: If dataset creation fails, provides detailed diagnostic information
-        
-    Note:
-        The MDPDataset constructor automatically segments the data into episodes
-        based on the 'dones' array, creating a list of Episode objects internally.
+        MDPDataset: A d3rlpy MDPDataset object containing the episodes.
     """
-    try:
-        dataset = MDPDataset(states, actions, rewards, dones)
-        return dataset
-    except Exception as e:
-        print(f"⚠️  Error creating MDP dataset: {e}")
-        # Try to diagnose the issue by checking shapes and types
-        print(f"States shape: {states.shape}, dtype: {states.dtype}")
-        print(f"Actions shape: {actions.shape}, dtype: {actions.dtype}")
-        print(f"Rewards shape: {rewards.shape}, dtype: {rewards.dtype}")
-        print(f"Dones shape: {dones.shape}, dtype: {dones.dtype}")
-        
-        # Check for NaN or inf values in the inputs
-        print(f"NaN in states: {any(any(x) for x in states)}")
-        print(f"Inf in states: {any(any(x) for x in states)}")
-        raise
+    episodes_list = []
+    current_episode_start_idx = 0
+    for i in range(len(dones_arr)):
+        if dones_arr[i]:  # If this is the last step of an episode
+            # Extract data for the current episode
+            # Episode data includes the terminal state, action, and reward
+            episode_observations = observations_arr[current_episode_start_idx : i + 1]
+            episode_actions = actions_arr[current_episode_start_idx : i + 1]
+            episode_rewards = rewards_arr[current_episode_start_idx : i + 1]
 
-def split_dataset(dataset, test_size=0.3, val_size=0.5, random_state=42):
+            if len(episode_observations) > 0: # Ensure episode is not empty
+                # d3rlpy.dataset.Episode expects observations, actions, rewards.
+                # For discrete actions, actions should be shaped (N,) or (N, 1).
+                # If actions_arr is 1D, episode_actions will be 1D, which is fine.
+                ep = Episode(
+                    observations=episode_observations,
+                    actions=episode_actions, # Ensure this is (episode_length,) or (episode_length, 1)
+                    rewards=episode_rewards
+                    # terminals are implicitly handled by d3rlpy based on episode structure
+                )
+                episodes_list.append(ep)
+            current_episode_start_idx = i + 1  # Next episode starts at the next index
+
+    # Handle the case where the data doesn't end with a 'done' flag for the last segment
+    if current_episode_start_idx < len(dones_arr):
+        print(f"Warning: Data might not end with a terminal state. Processing {len(dones_arr) - current_episode_start_idx} remaining transitions as a partial episode.")
+        episode_observations = observations_arr[current_episode_start_idx:]
+        episode_actions = actions_arr[current_episode_start_idx:]
+        episode_rewards = rewards_arr[current_episode_start_idx:]
+        if len(episode_observations) > 0: # Only add if there's actual data
+            ep = Episode(
+                observations=episode_observations,
+                actions=episode_actions,
+                rewards=episode_rewards,
+            )
+            episodes_list.append(ep)
+    
+    print(f"Created {len(episodes_list)} episodes from the provided data.")
+    return MDPDataset(episodes=episodes_list)
+
+
+def split_dataset(mdp_dataset_full, test_size=0.3, val_size=0.5, random_state=42):
     """
-    Split dataset into train, validation and test sets.
-    
-    This function creates a strategically split dataset to enable:
-    1. Training on the training set
-    2. Hyperparameter tuning using the validation set
-    3. Final evaluation on the held-out test set
-    
-    The splits are done at the episode level, so entire patient episodes
-    will be kept together in the same split.
-    
+    Splits the MDPDataset into training, validation, and test sets at the episode level.
+
     Args:
-        dataset (d3rlpy.dataset.MDPDataset): The complete dataset to split
-        test_size (float): Proportion of data to allocate to test+val sets (0.0-1.0)
-                          Default 0.3 means 70% train, 30% for test+val combined
-        val_size (float): Proportion of the test+val data to allocate to validation
-                         Default 0.5 means test and val sets are equal sized
-                         (with test_size=0.3 and val_size=0.5, you get:
-                          train=70%, val=15%, test=15%)
-        random_state (int): Random seed for reproducible splits
-        
+        mdp_dataset_full (MDPDataset): The full dataset containing all episodes.
+        test_size (float): Proportion of episodes to include in the test split.
+        val_size (float): Proportion of the remaining (non-test) episodes to include in the validation split.
+        random_state (int): Seed for random number generator for reproducibility.
+
     Returns:
         tuple: (train_episodes, val_episodes, test_episodes)
-            Each element is a list of d3rlpy.dataset.Episode objects
-            
-    Note:
-        The episodes are split randomly but deterministically based on random_state.
-        This ensures reproducibility while maintaining independence between sets.
+               Each element is a list of d3rlpy.dataset.Episode objects.
     """
-    # Split into train and temporary sets
-    # With default parameters: 70% train, 30% temp
-    train_eps, temp_eps = train_test_split(
-        dataset.episodes,
-        test_size=test_size,
-        random_state=random_state
-    )
+    all_episodes = mdp_dataset_full.episodes
     
-    # Split temporary set into validation and test sets
-    # With default parameters: 15% val, 15% test (each half of the temp set)
-    val_eps, test_eps = train_test_split(
-        temp_eps,
-        test_size=val_size,  # This is relative to temp_eps
-        random_state=random_state
-    )
-    
-    print(f"📊 Episodes  train={len(train_eps)}, val={len(val_eps)}, test={len(test_eps)}")
-    
-    return train_eps, val_eps, test_eps
+    if not all_episodes:
+        print("Warning: No episodes found in the dataset to split.")
+        return [], [], []
 
-def count_transitions(episodes):
+    # Split into training+validation and test sets
+    # Ensure there are enough episodes to split
+    if len(all_episodes) < 2 : # Need at least 2 episodes to make a split meaningful
+        print("Warning: Not enough episodes to perform a meaningful train/test split. Returning all episodes as training.")
+        return all_episodes, [], []
+
+    train_val_episodes, test_episodes = train_test_split(
+        all_episodes,
+        test_size=test_size,
+        random_state=random_state,
+        shuffle=True  # Shuffle episodes before splitting
+    )
+
+    # Split training+validation into training and validation sets
+    # Ensure there are enough episodes in train_val_episodes for a further split
+    if len(train_val_episodes) < 2 or val_size == 0.0:
+        # If not enough to split or val_size is 0, all remaining go to train
+        train_episodes = train_val_episodes
+        val_episodes = []
+    else:
+        train_episodes, val_episodes = train_test_split(
+            train_val_episodes,
+            test_size=val_size,  # val_size is proportion of train_val_episodes to become val_episodes
+            random_state=random_state,  # Consistent shuffling if desired
+            shuffle=True
+        )
+    
+    print(f"Dataset split: {len(train_episodes)} train, {len(val_episodes)} val, {len(test_episodes)} test episodes.")
+    return train_episodes, val_episodes, test_episodes
+
+def count_transitions(episodes_list):
     """
-    Count the total number of transitions (steps) in a list of episodes.
-    
-    This is useful for estimating computational requirements and
-    reporting dataset statistics. In reinforcement learning, the
-    number of transitions is often more relevant than the number of episodes,
-    especially for algorithms that learn from individual transitions.
-    
+    Counts the total number of transitions in a list of episodes.
+
     Args:
-        episodes (list): List of d3rlpy.dataset.Episode objects
-        
+        episodes_list (list): A list of d3rlpy.dataset.Episode objects.
+
     Returns:
-        int: Total number of transitions across all episodes
-        
-    Note:
-        Each episode.observations corresponds to one state-action-reward-next_state tuple,
-        which represents one transition in the MDP.
+        int: The total number of transitions.
     """
-    return sum(len(episode.observations) for episode in episodes)
+    if not episodes_list:
+        return 0
+    return sum(episode.size() for episode in episodes_list)

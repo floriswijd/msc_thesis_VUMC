@@ -117,7 +117,7 @@
         "params": {}
       },
       "compile_graph": false,
-      "learning_rate": 0.0003,
+      "learning_rate": 0.001,
       "optim_factory": {
         "type": "adam",
         "params": {
@@ -151,7 +151,7 @@
       },
       "n_critics": 1,
       "target_update_interval": 8000,
-      "alpha": 1.0
+      "alpha": 0.5
     }
   }
 }

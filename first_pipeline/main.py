@@ -90,8 +90,8 @@ def main():
     # ---------------------------------------------------------------------------
     print("\n=== Creating dataset ===")
     try:
-        # Create MDPDataset from preprocessed arrays
-        mdp_dataset = dataset.create_mdp_dataset(
+        # Create MDPDataset from preprocessed arrays - this is the full dataset
+        mdp_dataset_full = dataset.create_mdp_dataset( # Renamed for clarity
             data_dict["states"],    # State features (observations)
             data_dict["actions"],   # Actions taken by clinicians
             data_dict["rewards"],   # Rewards (clinical outcomes)
@@ -104,9 +104,20 @@ def main():
         utils.debug_inf_values(data_dict["states"], "states")
         utils.debug_inf_values(data_dict["rewards"], "rewards")
         
-        # Split dataset into train, validation and test sets
+        # Split dataset into train, validation and test sets (lists of Episode objects)
         # By default: 70% train, 15% val, 15% test
-        train_eps, val_eps, test_eps = dataset.split_dataset(mdp_dataset)
+        train_eps, val_eps, test_eps = dataset.split_dataset(mdp_dataset_full) # Split the full dataset
+
+        # Create a new MDPDataset containing only the training episodes
+        if not train_eps:
+            print("\n❌ Error: No training episodes after split. Exiting.")
+            sys.exit(1)
+        train_dataset = dataset.MDPDataset(episodes=train_eps)
+
+        # If you plan to use val_eps with d3rlpy's fit method for early stopping or hyperparameter tuning:
+        # val_dataset = dataset.MDPDataset(episodes=val_eps) if val_eps else None
+        # And then pass val_dataset to model.fit() in trainer.py if supported/needed.
+
     except Exception as e:
         print(f"\n❌ Error creating dataset: {e}")
         sys.exit(1)
@@ -116,6 +127,7 @@ def main():
     # ---------------------------------------------------------------------------
     print("\n=== Creating model ===")
     # Create observation scaler for state normalization
+    # The scaler will be fit on the dataset provided to model.fit(), which will be train_dataset
     scaler = model.create_scaler()
     # Configure CQL algorithm with hyperparameters
     cql_config = model.create_cql_config(
@@ -144,7 +156,7 @@ def main():
     # Train model with robust error handling and fallback strategies
     result, errors = trainer.train_model(
         model=cql,                  # CQL model to train
-        dataset=mdp_dataset,        # Full dataset for training
+        dataset=train_dataset,      # Pass the training-only dataset
         n_epochs=args.epochs,       # Number of training epochs
         experiment_name=args.logdir # Log directory name
     )
@@ -159,7 +171,8 @@ def main():
     # ---------------------------------------------------------------------------
     print("\n=== Evaluating model ===")
     # Calculate evaluation metrics on test episodes
-    metrics = evaluator.evaluate_model(cql, test_eps)
+    # test_eps is already a list of Episode objects, which is what evaluator.evaluate_model expects
+    metrics = evaluator.evaluate_model(cql, test_eps) 
     # Add training parameters to metrics for complete reporting
     metrics = evaluator.add_training_params_to_metrics(metrics, args)
     
