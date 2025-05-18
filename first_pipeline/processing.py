@@ -2,8 +2,8 @@ import pandas as pd
 import yaml
 from pathlib import Path
 
-RAW_CSV  = Path("HFNC codebase/first_pipeline/feature_engineered_data.csv")
-OUT_PARQ = Path("hfnc_episodes.parquet")
+RAW_CSV  = Path("data/feature_engineered_data.csv")
+OUT_PARQ = Path("data/hfnc_episodes.parquet")
 
 flow_edges = [0, 20, 40, 71] # Adjusted to include flow = 70 (last bin will be [40, 71))
 fio2_edges = [21, 40, 60, 80, 101] # Adjusted to include fio2 = 100
@@ -53,7 +53,7 @@ def main(debug=False):
     # ----- reward & done -----
     df["reward"] = df["spo2"].apply(lambda x: 0.1 if 92<=x<=96 else -0.05)
     terminal_idx = df.groupby(["subject_id","stay_id","hfnc_episode"]).tail(1).index
-    outcome_val  = {"Success":1.0,"Intubation":-1.0,"Death":-1.0}
+    outcome_val  = {"Success":1.0,"InvasiveVent":-1,"Intubation":-1.0,"Death":-1.0}
     df.loc[terminal_idx,"reward"] = df.loc[terminal_idx,"outcome_label"].map(outcome_val)
     df["done"] = False
     df.loc[terminal_idx,"done"] = True
@@ -63,6 +63,12 @@ def main(debug=False):
     df["action"] = df["action"].astype("int64")
     df["reward"] = df["reward"].astype("float32")
     df["done"]   = df["done"].astype("bool")
+
+    if debug:
+        print("\nNaN counts per column before saving:")
+        print(df.isnull().sum())
+        print(f"\nTotal NaN count in DataFrame: {df.isnull().sum().sum()}")
+
 
     # ----- save -----
     OUT_PARQ.parent.mkdir(parents=True, exist_ok=True)

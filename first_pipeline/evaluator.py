@@ -1,16 +1,49 @@
 #!/usr/bin/env python3
 # -----------------------------------------------------------
 # evaluator.py  --  Evaluation for HFNC CQL model
+# 
+# This module handles the evaluation of trained CQL models:
+# - Calculating performance metrics on test episodes
+# - Analyzing model predictions and policy match rates
+# - Adding training parameters to metrics for complete reporting
+# 
+# Proper evaluation is crucial for understanding model performance
+# and diagnosing potential issues in the training process.
 # -----------------------------------------------------------
 import numpy as np
 
 def evaluate_model(model, test_episodes):
-    """Evaluate the trained model on test episodes"""
+    """
+    Evaluate the trained model on test episodes to assess performance.
+    
+    This function calculates key metrics to evaluate the model:
+    1. Average returns (sum of rewards) on test episodes
+    2. Action match rate between predicted and actual actions
+    
+    These metrics help understand both how well the model matches the
+    clinician behavior and the expected outcomes from following the policy.
+    
+    Args:
+        model (DiscreteCQL): The trained CQL model to evaluate
+        test_episodes (list): List of Episode objects from the test set
+        
+    Returns:
+        dict: Dictionary containing evaluation metrics:
+            - test_returns_mean: Average return across test episodes
+            - test_returns_std: Standard deviation of returns
+            - policy_match_rate_mean: Average agreement with actual actions
+            - policy_match_rate_std: Standard deviation of match rates
+    
+    Note:
+        Missing the predict method or errors during prediction will be
+        handled gracefully with appropriate error messages.
+    """
     print("Evaluating on test episodes...")
     metrics = {}
     
     try:
         # Check if the model has predict method
+        # This ensures compatibility with different versions of d3rlpy
         if not hasattr(model, 'predict'):
             print("Model doesn't have predict method, skipping direct evaluation")
             return metrics
@@ -25,10 +58,12 @@ def evaluate_model(model, test_episodes):
             observations = episode.observations
             actions = []
             
-            # For each observation, get the predicted action
+            # For each observation, get the predicted action from the model
+            # This shows what the model would do in each state
             for obs in observations:
                 try:
                     # Handle potential issues with model.predict
+                    # Reshape is needed as predict expects a batch dimension
                     action = model.predict(obs.reshape(1, -1))[0]
                     actions.append(action)
                 except Exception as e:
@@ -36,12 +71,14 @@ def evaluate_model(model, test_episodes):
                     # Use a default action (e.g. 0) when prediction fails
                     actions.append(0)
             
-            # Compare to actual actions in the episode
+            # Compare to actual actions in the episode to calculate match rate
+            # Higher match rates indicate better imitation of clinician behavior
             match_count = sum(a1 == a2 for a1, a2 in zip(actions, episode.actions))
             this_match_rate = match_count / len(actions) if len(actions) > 0 else 0
             match_rates.append(this_match_rate)
             
-            # Calculate episode return
+            # Calculate episode return to evaluate expected policy performance
+            # Higher returns suggest better patient outcomes under the policy
             episode_return = sum(episode.rewards)
             test_returns.append(episode_return)
         
@@ -55,6 +92,7 @@ def evaluate_model(model, test_episodes):
         print(f"Policy match rate: mean={metrics['policy_match_rate_mean']:.4f}, std={metrics['policy_match_rate_std']:.4f}")
         
         # Look for episodes with very high or very low returns
+        # This can help identify outlier cases for further analysis
         if test_returns:
             max_return_idx = np.argmax(test_returns)
             min_return_idx = np.argmin(test_returns)
@@ -68,17 +106,57 @@ def evaluate_model(model, test_episodes):
     return metrics
 
 def add_training_params_to_metrics(metrics, args):
-    """Add training parameters to metrics"""
-    metrics["alpha"] = args.alpha
-    metrics["epochs"] = args.epochs
-    metrics["batch_size"] = args.batch
-    metrics["learning_rate"] = args.lr
-    metrics["gamma"] = args.gamma
+    """
+    Add training parameters to metrics for complete reporting.
+    
+    This ensures that the hyperparameters used for training are
+    saved alongside the resulting metrics, which is essential for
+    reproducibility and hyperparameter optimization.
+    
+    Args:
+        metrics (dict): Dictionary containing evaluation metrics
+        args (argparse.Namespace): Parsed command line arguments
+                                  containing training parameters
+        
+    Returns:
+        dict: Updated metrics dictionary with training parameters added
+        
+    Note:
+        This function is useful for maintaining a record of all experiment
+        settings alongside their results.
+    """
+    metrics["alpha"] = args.alpha        # CQL conservatism parameter
+    metrics["epochs"] = args.epochs      # Number of training epochs
+    metrics["batch_size"] = args.batch   # Batch size used for updates
+    metrics["learning_rate"] = args.lr   # Learning rate for optimizer
+    metrics["gamma"] = args.gamma        # Discount factor
     
     return metrics
 
 def analyze_predictions(model, test_episodes, top_n=5):
-    """Analyze model predictions on test episodes to detect issues"""
+    """
+    Analyze model predictions on test episodes to detect issues and provide insights.
+    
+    This function performs a detailed analysis of the model's predictions
+    on a subset of test episodes, looking at:
+    1. Action match rates (agreement with actual clinical decisions)
+    2. Confidence in predictions (difference between best and second best Q-values)
+    3. Specific disagreements between model and actual actions
+    
+    Args:
+        model (DiscreteCQL): The trained CQL model to analyze
+        test_episodes (list): List of Episode objects from the test set
+        top_n (int): Number of episodes to analyze in detail
+                    Default is 5
+                    
+    Side effects:
+        Prints detailed analysis of model predictions to console
+        
+    Note:
+        This function is particularly valuable for diagnosing issues with 
+        the model's policy and understanding where and why it disagrees
+        with clinician decisions.
+    """
     print(f"Analyzing model predictions on {len(test_episodes)} test episodes...")
     
     if not hasattr(model, 'predict'):
@@ -87,6 +165,7 @@ def analyze_predictions(model, test_episodes, top_n=5):
     
     try:
         # Select a few episodes for detailed analysis
+        # Limiting to top_n keeps the output manageable
         episodes_to_analyze = min(top_n, len(test_episodes))
         
         for i in range(episodes_to_analyze):
@@ -103,13 +182,16 @@ def analyze_predictions(model, test_episodes, top_n=5):
             
             for obs in observations:
                 # If model supports q-values, we can see the confidence in each action
+                # This helps diagnose uncertain predictions
                 try:
+                    # Get Q-values for all actions in this state
                     q_values = model.predict_value(obs.reshape(1, -1))[0]
                     action = model.predict(obs.reshape(1, -1))[0]
                     
                     predicted_actions.append(action)
                     
                     # Calculate confidence as difference between best and second best action
+                    # Higher values indicate more confident predictions
                     if len(q_values) > 1:
                         sorted_q = np.sort(q_values)[::-1]  # Sort in descending order
                         confidence = sorted_q[0] - sorted_q[1]
@@ -133,7 +215,8 @@ def analyze_predictions(model, test_episodes, top_n=5):
                 print(f"  Min confidence: {np.min(confidence_scores):.4f}")
                 print(f"  Max confidence: {np.max(confidence_scores):.4f}")
             
-            # Find disagreements
+            # Find disagreements between model and actual actions
+            # These are the most interesting cases to analyze
             disagreements = [(i, episode_actions[i], predicted_actions[i]) 
                            for i in range(len(observations)) 
                            if episode_actions[i] != predicted_actions[i]]

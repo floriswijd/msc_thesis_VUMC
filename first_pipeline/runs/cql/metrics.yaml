@@ -1,6 +1,6 @@
 alpha: 1.0
 batch_size: 256
-epochs: 50
+epochs: 10
 gamma: 0.99
 learning_rate: 0.001
 policy_match_rate_mean: 1.0
