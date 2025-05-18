@@ -96,8 +96,9 @@ def evaluate_model(model, test_episodes):
         if test_returns:
             max_return_idx = np.argmax(test_returns)
             min_return_idx = np.argmin(test_returns)
-            print(f"Highest return episode: {max_return_idx} with return {test_returns[max_return_idx]:.4f}")
-            print(f"Lowest return episode: {min_return_idx} with return {test_returns[min_return_idx]:.4f}")
+            # Ensure that the values from test_returns are Python scalars before formatting
+            print(f"Highest return episode: {max_return_idx} with return {test_returns[max_return_idx].item():.4f}")
+            print(f"Lowest return episode: {min_return_idx} with return {test_returns[min_return_idx].item():.4f}")
 
     except Exception as e:
         print(f"Warning: Could not evaluate: {e}")
@@ -207,13 +208,14 @@ def analyze_predictions(model, test_episodes, top_n=5):
             
             # Print summary
             print(f"  Length: {len(observations)} steps")
-            print(f"  Return: {episode_return:.4f}")
-            print(f"  Action match rate: {match_rate:.4f} ({match_count}/{len(observations)})")
-            
+            print(f"  Return: {episode_return.item():.4f}")
+            print(f"  Action match rate: {match_rate.item():.4f} ({match_count}/{len(observations)})")
+
             if confidence_scores:
-                print(f"  Avg confidence: {np.mean(confidence_scores):.4f}")
-                print(f"  Min confidence: {np.min(confidence_scores):.4f}")
-                print(f"  Max confidence: {np.max(confidence_scores):.4f}")
+                # np.mean, np.min, np.max on a list of numpy scalars return a numpy scalar. Convert to Python scalar.
+                print(f"  Avg confidence: {np.mean(confidence_scores).item():.4f}")
+                print(f"  Min confidence: {np.min(confidence_scores).item():.4f}")
+                print(f"  Max confidence: {np.max(confidence_scores).item():.4f}")
             
             # Find disagreements between model and actual actions
             # These are the most interesting cases to analyze
