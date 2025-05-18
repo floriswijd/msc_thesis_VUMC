@@ -98,7 +98,7 @@ def main():
     print("\n=== Training model ===")
     result, errors = trainer.train_model(
         model=cql,                  # CQL model to train
-        dataset=train_dataset,      # Pass the training-only dataset
+        dataset=train_eps,      # Pass the training-only dataset
         n_epochs=args.epochs,       # Number of training epochs
         experiment_name=args.logdir # Log directory name
     )
