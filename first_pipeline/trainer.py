@@ -1,31 +1,43 @@
 #!/usr/bin/env python3
 import numpy as np
 from dataset import count_transitions
+from d3rlpy.dataset import FIFOBuffer, ReplayBuffer
 
-def train_model(model, dataset, n_epochs, experiment_name=None):
+def train_model(model, train_episodes, n_epochs, experiment_name=None, val_episodes=None):
     print("🚀  Starting training DiscreteCQL...")
-    n_transitions = sum(len(episode.observations) for episode in dataset.episodes)
+    n_transitions = sum(len(ep.observations) for ep in train_episodes)
     print(f"Using dataset with {n_transitions} transitions for training")
-    n_steps = n_epochs * 10000
+
+    steps_per_epoch = 10000
+    n_steps        = n_epochs * steps_per_epoch
+    
+    buffer_limit = n_transitions
+    replay_buffer = ReplayBuffer(
+        buffer=FIFOBuffer(limit=buffer_limit),
+        episodes=train_episodes
+    )
     print(f"Training for estimated {n_steps} steps...")
     try:
         result = model.fit(
-            dataset=dataset,
+            replay_buffer,               # first positional arg
             n_steps=n_steps,
+            n_steps_per_epoch=steps_per_epoch,
             experiment_name=experiment_name,
-            save_interval=n_steps // 10,
             show_progress=True,
+            save_interval=max(n_steps // 10, 1),
+           evaluators=None if val_episodes is None else val_episodes,
         )
         print("✅  Training completed successfully!")
         return result, None
     except Exception as first_error:
         print(f"⚠️  Error during training: {first_error}")
         print("Trying alternative training approach...")
+        quit()
         try:
             n_steps_reduced = n_epochs * 1000
             print(f"Training with simplified approach for {n_steps_reduced} steps...")
             result = model.fit(
-                dataset=dataset,
+                train_episodes,
                 n_steps=n_steps_reduced,
                 experiment_name=experiment_name,
             )

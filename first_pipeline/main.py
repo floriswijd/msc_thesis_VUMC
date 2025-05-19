@@ -71,7 +71,7 @@ def main():
         if not train_eps:
             print("\n❌ Error: No training episodes after split. Exiting.")
             sys.exit(1)
-        train_dataset = dataset.MDPDataset(episodes=train_eps)
+        # train_dataset = dataset.MDPDataset(episodes=train_eps) <- #can't do this gives an error
 
     except Exception as e:
         print(f"\n❌ Error creating dataset: {e}")
@@ -98,7 +98,7 @@ def main():
     print("\n=== Training model ===")
     result, errors = trainer.train_model(
         model=cql,                  # CQL model to train
-        dataset=train_eps,      # Pass the training-only dataset
+        train_episodes=train_eps,      # Pass the training-only dataset
         n_epochs=args.epochs,       # Number of training epochs
         experiment_name=args.logdir # Log directory name
     )
