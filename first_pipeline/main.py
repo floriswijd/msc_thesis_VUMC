@@ -96,6 +96,12 @@ def main():
     except Exception as e:
         print(f"\n❌ Error creating model: {e}")
         sys.exit(1)
+    
+    # Construct the correct base path for d3rlpy logs
+    # d3rlpy saves logs to d3rlpy_logs/<experiment_name>/
+    # In this setup, experiment_name passed to model.fit() is args.logdir
+    actual_d3rlpy_log_dir = Path("d3rlpy_logs") / args.logdir
+
     print("\n=== Training model ===")
     result, errors = trainer.train_model(
         model=cql,                  # CQL model to train
@@ -103,19 +109,51 @@ def main():
         n_epochs=args.epochs,       # Number of training epochs
         experiment_name=args.logdir # Log directory name
     )
-    
+
     if errors:
         print("\n⚠️ Training encountered errors, checking logs for diagnosis...")
-        trainer.check_training_logs(args.logdir)
+        # Pass the corrected path to check_training_logs
+        trainer.check_training_logs(actual_d3rlpy_log_dir)
+
     print("\n=== Evaluating model ===")
     metrics = evaluator.evaluate_model(cql, test_eps) 
     metrics = evaluator.add_training_params_to_metrics(metrics, args)
     print("\n=== Analyzing predictions ===")
     evaluator.analyze_predictions(cql, test_eps, top_n=3)
-    print("\n=== Analyzing training logs ===")
-    utils.check_gradient_values(args.logdir)
-    utils.plot_training_curves(args.logdir)
-    print("\n=== Saving results ===")
+
+    print("\\n=== Analyzing training logs (from d3rlpy output) ===")
+    
+    # --- Find the latest d3rlpy log directory for the current run pattern ---
+    base_d3rlpy_runs_dir = Path("d3rlpy_logs") / "runs"
+    latest_log_dir = None
+    
+    if base_d3rlpy_runs_dir.exists() and base_d3rlpy_runs_dir.is_dir():
+        # Assuming args.logdir is like "runs/cql", we get "cql"
+        run_prefix = Path(args.logdir).name # e.g., "cql"
+        
+        # Find all subdirectories in base_d3rlpy_runs_dir that start with run_prefix + "_"
+        # e.g., cql_20250519162207
+        potential_dirs = sorted([
+            d for d in base_d3rlpy_runs_dir.iterdir() 
+            if d.is_dir() and d.name.startswith(f"{run_prefix}_")
+        ])
+        
+        if potential_dirs:
+            latest_log_dir = potential_dirs[-1] # Get the last one (latest timestamp)
+            print(f"ℹ️  Found latest d3rlpy log directory for plotting: {latest_log_dir}")
+        else:
+            print(f"⚠️  Warning: No timestamped log directories found matching prefix '{run_prefix}_' in {base_d3rlpy_runs_dir}")
+    else:
+        print(f"⚠️  Warning: Base d3rlpy runs directory not found at {base_d3rlpy_runs_dir}")
+
+    # Ensure the directory exists before trying to analyze logs
+    if latest_log_dir and latest_log_dir.exists() and latest_log_dir.is_dir():
+        utils.check_gradient_values(latest_log_dir)
+        utils.plot_training_curves(latest_log_dir)
+    else:
+        print(f"⚠️  Warning: d3rlpy log directory for plotting not found or not valid, skipping plot generation.")
+
+    print("\\n=== Saving results ===")
     config.save_metrics(metrics, paths["metric_path"])
     model.save_model(cql, paths["model_path"])
     print("\n=== Training complete ===")

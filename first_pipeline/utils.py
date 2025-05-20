@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
+import glob
 
 def timestamp_string():
     return datetime.datetime.now().strftime("%Y%m%d%H%M%S")
@@ -38,41 +39,61 @@ def debug_inf_values(array, name="array"):
     return False
 
 def plot_training_curves(log_dir):
+    print(f"Plotting training curves from {log_dir}...")
+    if not os.path.exists(log_dir):
+        print(f"⚠️  WARNING: Log directory {log_dir} does not exist.")
+        return
     try:
-        import pandas as pd
-        import matplotlib.pyplot as plt
-        import glob
-        import os
         log_files = glob.glob(os.path.join(log_dir, "*.csv"))
+        if not log_files:
+            print(f"No CSV files found in {log_dir}")
+            return
+
+        # Define default column names for headerless CSVs from d3rlpy
+        # Column 0: epoch (or an equivalent index)
+        # Column 1: step
+        # Column 2: metric value
+        default_col_names = ['epoch_idx', 'step', 'value']
+
         for log_file in log_files:
+            # log_name is derived from the filename, e.g., "time_step", "conservative_loss"
+            log_name = os.path.basename(log_file).replace('.csv', '')
             try:
-                log_name = os.path.basename(log_file).replace('.csv', '')
-                df = pd.read_csv(log_file)
+                # Read CSV without a header row and assign default column names
+                df = pd.read_csv(log_file, header=None, names=default_col_names)
+                
                 if df.empty:
+                    print(f"Skipping empty log file: {log_file}")
                     continue
+                
+                # Ensure the necessary columns 'step' and 'value' are present after assignment
+                if 'step' not in df.columns or 'value' not in df.columns:
+                    print(f"Skipping {log_file}: Default columns 'step' or 'value' not found after assignment. DataFrame columns: {df.columns.tolist()}")
+                    continue
+
                 plt.figure(figsize=(10, 6))
-                if 'step' in df.columns:
-                    x = df['step']
-                    x_label = 'Step'
-                else:
-                    x = df.index
-                    x_label = 'Iteration'
-                for col in df.select_dtypes(include=[np.number]).columns:
-                    if col != 'step':
-                        plt.plot(x, df[col], label=col)
-                plt.title(f'{log_name} Training Curve')
-                plt.xlabel(x_label)
-                plt.ylabel('Value')
-                plt.legend()
+                # Plot 'step' vs 'value'
+                plt.plot(df['step'], df['value'], label=log_name)
+                
+                plt.xlabel("Step") # X-axis is always 'Step'
+                # Y-axis label uses the filename-derived metric name
+                plt.ylabel(log_name.replace('_', ' ').capitalize()) 
+                # Title also uses the filename-derived metric name
+                plt.title(f"{log_name.replace('_', ' ').capitalize()} Training Curve") 
+                
+                plt.legend() # Legend will show the filename-based log_name
                 plt.grid(True)
-                save_path = os.path.join(log_dir, f'{log_name}_plot.png')
-                plt.savefig(save_path)
-                plt.close()
-                print(f"Plot saved to {save_path}")
+                
+                plot_save_path = os.path.join(log_dir, f"{log_name}_curve.png")
+                plt.savefig(plot_save_path)
+                plt.close() # Close the figure to free memory
+                print(f"  📈 Saved plot: {plot_save_path}")
             except Exception as e:
-                print(f"Error plotting {log_file}: {e}")
+                print(f"Error processing or plotting {log_file}: {e}")
+                if 'plt' in locals() and plt.gcf().get_axes(): # Attempt to close figure on error
+                     plt.close()
     except Exception as e:
-        print(f"Error plotting training curves: {e}")
+        print(f"Error accessing log directory {log_dir} for plotting: {e}")
 
 def check_gradient_values(log_dir):
     try:
