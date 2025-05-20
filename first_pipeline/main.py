@@ -50,7 +50,8 @@ def main():
             print("PyTorch CUDA support not available, using CPU")
     print("\n=== Loading and preprocessing data ===")
     df = data_loader.load_data(args.data)
-    cfg = config.load_config(args.cfg)
+    # cfg = config.load_config(args.cfg)
+    
     data_dict = data_loader.preprocess_data(df)
     print("\n=== Creating dataset ===")
     try:
