@@ -3,7 +3,7 @@ batch_size: 256
 epochs: 5
 gamma: 0.99
 learning_rate: 0.001
-policy_match_rate_mean: 0.9975056447328475
-policy_match_rate_std: 0.03502810549567597
+policy_match_rate_mean: 0.9977002996150025
+policy_match_rate_std: 0.03462939042726137
 test_returns_mean: 1.186848759651184
 test_returns_std: 1.8429943323135376
