@@ -217,12 +217,6 @@ class HFNCClinicalValidator:
             predicted_outcomes = []
             actual_outcomes = episode.rewards  # Assuming rewards represent outcomes
             
-            # Ensure actual_outcomes is a 1D array
-            if hasattr(actual_outcomes, 'flatten'):
-                actual_outcomes = actual_outcomes.flatten()
-            elif not isinstance(actual_outcomes, (list, np.ndarray)):
-                actual_outcomes = [actual_outcomes] if actual_outcomes is not None else []
-            
             for i, obs in enumerate(episode.observations):
                 try:
                     action = self.model.predict(obs.reshape(1, -1))[0]
@@ -236,23 +230,10 @@ class HFNCClinicalValidator:
                 except Exception as e:
                     predicted_outcomes.append(0.5)  # Neutral prediction
             
-            # Compare predicted vs actual outcomes - ensure same length
-            if len(predicted_outcomes) > 0 and len(actual_outcomes) > 0:
-                # Take the minimum length to ensure alignment
-                min_length = min(len(predicted_outcomes), len(actual_outcomes))
-                predicted_aligned = predicted_outcomes[:min_length]
-                actual_aligned = actual_outcomes[:min_length]
-                
-                # Calculate correlation only if we have more than one data point
-                if min_length > 1:
-                    try:
-                        correlation = np.corrcoef(predicted_aligned, actual_aligned)[0, 1]
-                        # Handle NaN correlations (e.g., when one array has no variance)
-                        if not np.isnan(correlation):
-                            outcome_predictions.append(correlation)
-                    except Exception as e:
-                        # If correlation calculation fails, skip this episode
-                        continue
+            # Compare predicted vs actual outcomes
+            if len(predicted_outcomes) == len(actual_outcomes):
+                correlation = np.corrcoef(predicted_outcomes, actual_outcomes)[0, 1] if len(predicted_outcomes) > 1 else 0
+                outcome_predictions.append(correlation)
         
         return {
             'mean_effectiveness_score': float(np.mean(effectiveness_scores)) if effectiveness_scores else 0,
@@ -511,77 +492,6 @@ class HFNCClinicalValidator:
         """Plot treatment effectiveness comparison"""
         # Implementation would depend on your effectiveness metrics
         pass
-    
-    def _generate_clinical_report(self, safety_results, save_dir):
-        """Generate comprehensive clinical validation report"""
-        report_path = save_dir / 'clinical_validation_report.md'
-        
-        with open(report_path, 'w') as f:
-            f.write("# Clinical Validation Report: HFNC CQL Model\n\n")
-            f.write("## Executive Summary\n")
-            f.write("This report provides a comprehensive clinical validation of the Conservative Q-Learning (CQL) model ")
-            f.write("for High-Flow Nasal Cannula (HFNC) parameter optimization, focusing on patient safety, ")
-            f.write("clinical appropriateness, and treatment effectiveness.\n\n")
-            
-            # Parameter Safety Section
-            if 'parameter_safety' in safety_results:
-                ps = safety_results['parameter_safety']
-                f.write("## Parameter Safety Analysis\n")
-                f.write(f"- Overall Safety Score: {ps.get('safety_score', 'N/A'):.3f}\n")
-                f.write(f"- Total Safety Violations: {ps.get('total_violations', 'N/A')}\n")
-                f.write(f"- Violation Rate per Parameter:\n")
-                for param, rate in ps.get('violation_rates', {}).items():
-                    f.write(f"  - {param}: {rate:.3f}\n")
-                f.write("\n")
-            
-            # Clinical Appropriateness Section
-            if 'clinical_appropriateness' in safety_results:
-                ca = safety_results['clinical_appropriateness']
-                f.write("## Clinical Appropriateness Assessment\n")
-                f.write(f"- Mean Appropriateness Score: {ca.get('mean_appropriateness', 'N/A'):.3f}\n")
-                f.write(f"- High Appropriateness Rate: {ca.get('high_appropriateness_rate', 'N/A'):.3f}\n")
-                f.write("\n")
-            
-            # Patient Safety Section
-            if 'patient_safety' in safety_results:
-                ps = safety_results['patient_safety']
-                f.write("## Patient Safety Evaluation\n")
-                f.write(f"- Overall Safety Score: {ps.get('overall_safety_score', 'N/A'):.3f}\n")
-                f.write(f"- High Risk Episodes: {ps.get('high_risk_episodes', 'N/A')}\n")
-                f.write(f"- Safety Violation Rate: {ps.get('safety_violation_rate', 'N/A'):.3f}\n")
-                f.write("\n")
-            
-            # Treatment Effectiveness Section
-            if 'treatment_effectiveness' in safety_results:
-                te = safety_results['treatment_effectiveness']
-                f.write("## Treatment Effectiveness Analysis\n")
-                f.write(f"- Mean Effectiveness Score: {te.get('mean_effectiveness_score', 'N/A'):.3f}\n")
-                f.write(f"- Prediction Accuracy: {te.get('prediction_accuracy', 'N/A'):.3f}\n")
-                f.write(f"- High Effectiveness Rate: {te.get('high_effectiveness_rate', 'N/A'):.3f}\n")
-                f.write("\n")
-            
-            # Adverse Events Section
-            if 'adverse_events' in safety_results:
-                ae = safety_results['adverse_events']
-                f.write("## Adverse Event Risk Assessment\n")
-                f.write(f"- Overall Adverse Event Risk: {ae.get('overall_adverse_event_risk', 'N/A'):.3f}\n")
-                f.write(f"- High Risk Decisions: {ae.get('high_risk_decisions', 'N/A')}\n")
-                f.write("- Risk Category Rates:\n")
-                for category, rate in ae.get('risk_category_rates', {}).items():
-                    f.write(f"  - {category}: {rate:.3f}\n")
-                f.write("\n")
-            
-            f.write("## Clinical Interpretation\n")
-            f.write("The validation results demonstrate the model's adherence to clinical safety guidelines ")
-            f.write("and its potential for safe deployment in clinical settings. The analysis shows ")
-            f.write("appropriate parameter selection patterns and low adverse event risk profiles.\n\n")
-            
-            f.write("## Recommendations\n")
-            f.write("Based on the validation results:\n")
-            f.write("1. The model shows acceptable safety profiles for clinical deployment\n")
-            f.write("2. Continuous monitoring of parameter appropriateness is recommended\n")
-            f.write("3. Integration with clinical decision support systems should include safety alerts\n")
-            f.write("4. Regular re-validation with new clinical data is essential\n")
 
 def validate_clinical_safety(model, test_episodes, save_dir="clinical_validation"):
     """Convenience function for clinical validation"""
