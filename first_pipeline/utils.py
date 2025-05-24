@@ -159,13 +159,44 @@ def check_gradient_values(log_dir):
                 nan_count = df.isna().sum().sum()
                 if nan_count > 0:
                     print(f"⚠️  WARNING: {grad_name} has {nan_count} NaN gradient values")
-                if df.abs().max().max() > 100:
-                    max_val = df.abs().max().max()
+                
+                # Check for large gradients, excluding non-gradient columns like epoch and step
+                if 'min' in df.columns and 'max' in df.columns:
+                    # For gradient files with min/max columns, check actual gradient values
+                    max_val = max(df['max'].abs().max(), df['min'].abs().max())
+                else:
+                    # For other gradient files, exclude epoch and step columns
+                    gradient_cols = [col for col in df.columns if col not in ['epoch', 'step']]
+                    if gradient_cols:
+                        max_val = df[gradient_cols].abs().max().max()
+                    else:
+                        max_val = 0
+                
+                if max_val > 100:
                     print(f"⚠️  WARNING: {grad_name} has very large gradient values: {max_val}")
-                non_zero = df[df != 0]
-                if non_zero.size > 0 and non_zero.abs().min().min() < 1e-8:
-                    min_val = non_zero.abs().min().min()
-                    print(f"⚠️  WARNING: {grad_name} has very small gradient values: {min_val}")
+                
+                # Check for very small gradients
+                if 'min' in df.columns and 'max' in df.columns:
+                    # For gradient files with min/max columns
+                    non_zero_min = df['min'][df['min'] != 0]
+                    non_zero_max = df['max'][df['max'] != 0]
+                    if len(non_zero_min) > 0 or len(non_zero_max) > 0:
+                        min_vals = []
+                        if len(non_zero_min) > 0:
+                            min_vals.append(non_zero_min.abs().min())
+                        if len(non_zero_max) > 0:
+                            min_vals.append(non_zero_max.abs().min())
+                        if min_vals and min(min_vals) < 1e-8:
+                            min_val = min(min_vals)
+                            print(f"⚠️  WARNING: {grad_name} has very small gradient values: {min_val}")
+                else:
+                    # For other gradient files
+                    gradient_cols = [col for col in df.columns if col not in ['epoch', 'step']]
+                    if gradient_cols:
+                        non_zero = df[gradient_cols][df[gradient_cols] != 0]
+                        if non_zero.size > 0 and non_zero.abs().min().min() < 1e-8:
+                            min_val = non_zero.abs().min().min()
+                            print(f"⚠️  WARNING: {grad_name} has very small gradient values: {min_val}")
             except Exception as e:
                 print(f"Error checking gradient file {grad_file}: {e}")
     except Exception as e:

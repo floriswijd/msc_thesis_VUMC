@@ -66,7 +66,19 @@ def check_training_logs(log_dir):
                     print(f"⚠️  WARNING: {log_name} contains {nan_count} NaN values")
                     nan_cols = df.columns[df.isna().any()].tolist()
                     print(f"  NaN values found in columns: {nan_cols}")
-                max_vals = df.max().max()
+                
+                # Check for extreme values, but exclude non-data columns like epoch and step
+                if 'min' in df.columns and 'max' in df.columns:
+                    # For gradient files with min/max columns, check actual gradient values
+                    max_vals = max(df['max'].abs().max(), df['min'].abs().max())
+                else:
+                    # For other files, exclude epoch and step columns from extreme value check
+                    data_cols = [col for col in df.columns if col not in ['epoch', 'step']]
+                    if data_cols:
+                        max_vals = df[data_cols].max().max()
+                    else:
+                        max_vals = 0
+                
                 if max_vals > 1e6:
                     if log_name not in issues:
                         issues[log_name] = f"Contains extreme values ({max_vals})"

@@ -33,6 +33,7 @@ import model       # CQL model configuration
 import trainer     # Training orchestration
 import evaluator   # Model evaluation
 import utils       # Utility functions for debugging and visualization
+from validator import CQLValidator      
 
 def main():
     args = config.parse_args()
@@ -116,8 +117,66 @@ def main():
         trainer.check_training_logs(actual_d3rlpy_log_dir)
 
     print("\n=== Evaluating model ===")
-    metrics = evaluator.evaluate_model(cql, test_eps) 
-    metrics = evaluator.add_training_params_to_metrics(metrics, args)
+    # Use the new comprehensive evaluation framework
+    from evaluator import CQLEvaluator
+    
+    evaluator = CQLEvaluator(cql)
+    comprehensive_results = evaluator.evaluate_comprehensive(test_eps, save_dir="evaluation_results")
+    
+    # Also keep basic metrics for backward compatibility
+    basic_metrics = evaluator._evaluate_basic_performance(test_eps)
+    metrics = evaluator.add_training_params_to_metrics(basic_metrics, args)
+    
+    print("\n=== Academic Performance Summary ===")
+    if 'basic_performance' in comprehensive_results:
+        bp = comprehensive_results['basic_performance']
+        print(f"📊 Action Agreement with Clinicians: {bp['mean_action_agreement']:.3f} ± {bp['std_action_agreement']:.3f}")
+        print(f"📊 Mean Episode Return: {bp['mean_return']:.3f} ± {bp['std_return']:.3f}")
+        print(f"📊 Total Episodes Evaluated: {bp['total_episodes']}")
+    
+    if 'clinical_performance' in comprehensive_results:
+        cp = comprehensive_results['clinical_performance']
+        print(f"🏥 Safety Violation Rate: {cp['safety_violation_rate']:.3f}")
+        print(f"🏥 Parameter Appropriateness: {cp['parameter_appropriateness_score']:.3f}")
+        print(f"🏥 Outcome Improvement vs Clinicians: {cp['outcome_improvement']:.3f}")
+    
+    if 'statistical_analysis' in comprehensive_results:
+        sa = comprehensive_results['statistical_analysis']
+        print(f"📈 Effect Size (Cohen's d): {sa['cohens_d']:.3f} ({sa['effect_size_interpretation']})")
+        if 'paired_t_test' in sa:
+            print(f"📈 Statistical Significance (p-value): {sa['paired_t_test']['p_value']:.4f}")
+    
+    if 'policy_analysis' in comprehensive_results:
+        pa = comprehensive_results['policy_analysis']
+        print(f"🎯 Policy Entropy: {pa['policy_entropy']:.3f}")
+        print(f"🎯 Action Distribution: {dict(list(pa['action_distribution'].items())[:5])}")  # Show top 5
+    
+    print("\n📊 Academic visualizations and detailed report saved to 'evaluation_results/' directory")
+    
+    # Add clinical safety validation
+    print("\n=== Clinical Safety Validation ===")
+    from clinical_validator import validate_clinical_safety
+    
+    clinical_results = validate_clinical_safety(cql, test_eps, save_dir="clinical_validation")
+    
+    print("🏥 Clinical Safety Results:")
+    if 'parameter_safety' in clinical_results:
+        ps = clinical_results['parameter_safety']
+        print(f"   Parameter Safety Score: {ps['safety_score']:.3f}")
+        print(f"   Total Safety Violations: {ps['total_violations']}")
+    
+    if 'clinical_appropriateness' in clinical_results:
+        ca = clinical_results['clinical_appropriateness']
+        print(f"   Clinical Appropriateness: {ca['mean_appropriateness']:.3f}")
+        print(f"   High Appropriateness Rate: {ca['high_appropriateness_rate']:.3f}")
+    
+    if 'adverse_events' in clinical_results:
+        ae = clinical_results['adverse_events']
+        print(f"   Adverse Event Risk: {ae['overall_adverse_event_risk']:.3f}")
+        print(f"   High Risk Decisions: {ae['high_risk_decisions']}")
+    
+    print("🏥 Clinical validation report saved to 'clinical_validation/' directory")
+    
     print("\n=== Analyzing predictions ===")
     evaluator.analyze_predictions(cql, test_eps, top_n=3)
 
@@ -157,6 +216,55 @@ def main():
     config.save_metrics(metrics, paths["metric_path"])
     model.save_model(cql, paths["model_path"])
     print("\n=== Training complete ===")
+
+    print("\n=== Validating pipeline ===")
+
+    # Fix: Use the correct path to config.yaml (in parent directory)
+    config_path = Path("../../config.yaml")  # Go up two levels to find config.yaml
+    validator = CQLValidator(config_path)
+
+    try:
+        # 1) data checks (pass the raw df for episode-length analysis)
+        print("Running data quality validation...")
+        data_result = validator.validate_data_quality(data_dict, df)
+        if not data_result["passed"]:
+            print(f"❌ Data quality issues found: {data_result['errors']}")
+        if data_result["warnings"]:
+            print(f"⚠️  Data warnings: {data_result['warnings']}")
+
+        # 2) model decision analysis
+        print("Running model behavior validation...")
+        model_result = validator.validate_model_behavior(cql, test_eps)
+        if not model_result["passed"]:
+            print(f"❌ Model behavior issues found: {model_result['errors']}")
+        if model_result["warnings"]:
+            print(f"⚠️  Model warnings: {model_result['warnings']}")
+
+        # 3) clinical safety rules
+        print("Running clinical plausibility validation...")
+        clinical_result = validator.validate_clinical_plausibility(cql, test_eps)
+        if not clinical_result["passed"]:
+            print(f"❌ Clinical plausibility issues found: {clinical_result['errors']}")
+        if clinical_result["warnings"]:
+            print(f"⚠️  Clinical warnings: {clinical_result['warnings']}")
+
+        # 4) training-log sanity checks
+        print("Running training stability validation...")
+        if latest_log_dir and latest_log_dir.exists():
+            stability_result = validator.validate_training_stability(latest_log_dir)
+            if not stability_result["passed"]:
+                print(f"❌ Training stability issues found: {stability_result['errors']}")
+            if stability_result["warnings"]:
+                print(f"⚠️  Training warnings: {stability_result['warnings']}")
+        else:
+            print("⚠️  Could not find log directory for training stability validation")
+            
+        print("✅ Validation completed successfully!")
+        
+    except Exception as e:
+        print(f"❌ Validation failed with error: {e}")
+        import traceback
+        traceback.print_exc()
     
 if __name__ == "__main__":
     main()
