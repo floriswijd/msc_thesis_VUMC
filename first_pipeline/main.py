@@ -98,11 +98,6 @@ def main():
         print(f"\n❌ Error creating model: {e}")
         sys.exit(1)
     
-    # Construct the correct base path for d3rlpy logs
-    # d3rlpy saves logs to d3rlpy_logs/<experiment_name>/
-    # In this setup, experiment_name passed to model.fit() is args.logdir
-    actual_d3rlpy_log_dir = Path("d3rlpy_logs") / args.logdir
-
     print("\n=== Training model ===")
     result, errors = trainer.train_model(
         model=cql,                  # CQL model to train
@@ -112,22 +107,67 @@ def main():
     )
 
     if errors:
-        print("\n⚠️ Training encountered errors, checking logs for diagnosis...")
+        print("\\n⚠️ Training encountered errors, checking logs for diagnosis...")
         # Pass the corrected path to check_training_logs
+        actual_d3rlpy_log_dir = Path("d3rlpy_logs") / args.logdir
         trainer.check_training_logs(actual_d3rlpy_log_dir)
 
-    print("\n=== Evaluating model ===")
+    # --- Determine the latest d3rlpy log directory for saving evaluation outputs and analyzing training logs ---
+    # This logic is moved from its original position later in the script.
+    latest_log_dir_for_outputs = None
+    # Original logic to find the specific timestamped run directory:
+    # Assumes args.logdir might be like "runs/cql", where "runs" is a subdir in d3rlpy_logs
+    # and "cql" is the prefix for the timestamped folder.
+    logdir_path_obj = Path(args.logdir) # e.g., Path("runs/cql")
+    # search_parent_dir should be where timestamped folders like "cql_xxxx" reside.
+    # Based on user's example: /Users/floppie/Documents/Msc Scriptie/HFNC codebase/first_pipeline/d3rlpy_logs/runs/cql_20250524174450
+    # This implies base_d3rlpy_runs_dir = Path("d3rlpy_logs") / "runs" if args.logdir is "runs/cql"
+    # or more generally, Path("d3rlpy_logs") / logdir_path_obj.parent
+    
+    # The original script had: base_d3rlpy_runs_dir = Path("d3rlpy_logs") / "runs"
+    # Let's assume logdir_path_obj.parent correctly gives "runs" or similar if args.logdir is "runs/cql"
+    # If args.logdir is just "cql", then logdir_path_obj.parent is ".", so search_parent_dir becomes "d3rlpy_logs"
+    # The original code explicitly used Path("d3rlpy_logs") / "runs". We'll stick to that for base_d3rlpy_runs_dir
+    # as it matches the user's example path structure.
+    base_d3rlpy_runs_dir_for_search = Path("d3rlpy_logs") / "runs"
+    run_prefix_for_search = logdir_path_obj.name # e.g., "cql" if args.logdir is "runs/cql" or just "cql"
+
+    if base_d3rlpy_runs_dir_for_search.exists() and base_d3rlpy_runs_dir_for_search.is_dir():
+        potential_dirs = sorted([
+            d for d in base_d3rlpy_runs_dir_for_search.iterdir()
+            if d.is_dir() and d.name.startswith(f"{run_prefix_for_search}_")
+        ])
+        if potential_dirs:
+            latest_log_dir_for_outputs = potential_dirs[-1]
+            print(f"ℹ️  Using latest run log directory for outputs: {latest_log_dir_for_outputs}")
+        else:
+            print(f"⚠️  Warning: No timestamped log directory found matching prefix '{run_prefix_for_search}_' in {base_d3rlpy_runs_dir_for_search}.")
+    else:
+        print(f"⚠️  Warning: Base d3rlpy runs directory for search ({base_d3rlpy_runs_dir_for_search}) not found.")
+
+    # Determine save directories
+    if latest_log_dir_for_outputs:
+        evaluation_results_save_dir = latest_log_dir_for_outputs
+        clinical_validation_results_save_dir = latest_log_dir_for_outputs
+        save_location_message_suffix = f"in '{latest_log_dir_for_outputs}'"
+    else:
+        evaluation_results_save_dir = Path("evaluation_results")
+        clinical_validation_results_save_dir = Path("clinical_validation")
+        save_location_message_suffix = "in their respective default directories ('evaluation_results/', 'clinical_validation/')"
+        print(f"⚠️  Outputs will be saved {save_location_message_suffix} as the specific run directory was not identified.")
+
+    print("\\n=== Evaluating model ===")
     # Use the new comprehensive evaluation framework
     from evaluator import CQLEvaluator
     
-    evaluator = CQLEvaluator(cql)
-    comprehensive_results = evaluator.evaluate_comprehensive(test_eps, save_dir="evaluation_results")
+    cql_evaluator_obj = CQLEvaluator(cql) # Renamed instance
+    comprehensive_results = cql_evaluator_obj.evaluate_comprehensive(test_eps, save_dir=evaluation_results_save_dir)
     
     # Also keep basic metrics for backward compatibility
-    basic_metrics = evaluator._evaluate_basic_performance(test_eps)
-    metrics = evaluator.add_training_params_to_metrics(basic_metrics, args)
+    basic_metrics = cql_evaluator_obj._evaluate_basic_performance(test_eps)
+    metrics = cql_evaluator_obj.add_training_params_to_metrics(basic_metrics, args)
     
-    print("\n=== Academic Performance Summary ===")
+    print("\\n=== Academic Performance Summary ===")
     if 'basic_performance' in comprehensive_results:
         bp = comprehensive_results['basic_performance']
         print(f"📊 Action Agreement with Clinicians: {bp['mean_action_agreement']:.3f} ± {bp['std_action_agreement']:.3f}")
@@ -151,13 +191,13 @@ def main():
         print(f"🎯 Policy Entropy: {pa['policy_entropy']:.3f}")
         print(f"🎯 Action Distribution: {dict(list(pa['action_distribution'].items())[:5])}")  # Show top 5
     
-    print("\n📊 Academic visualizations and detailed report saved to 'evaluation_results/' directory")
+    print(f"\\n📊 Academic visualizations and detailed report saved {save_location_message_suffix}")
     
     # Add clinical safety validation
-    print("\n=== Clinical Safety Validation ===")
+    print("\\n=== Clinical Safety Validation ===")
     from clinical_validator import validate_clinical_safety
     
-    clinical_results = validate_clinical_safety(cql, test_eps, save_dir="clinical_validation")
+    clinical_results = validate_clinical_safety(cql, test_eps, save_dir=clinical_validation_results_save_dir)
     
     print("🏥 Clinical Safety Results:")
     if 'parameter_safety' in clinical_results:
@@ -175,42 +215,22 @@ def main():
         print(f"   Adverse Event Risk: {ae['overall_adverse_event_risk']:.3f}")
         print(f"   High Risk Decisions: {ae['high_risk_decisions']}")
     
-    print("🏥 Clinical validation report saved to 'clinical_validation/' directory")
+    print(f"🏥 Clinical validation report saved {save_location_message_suffix}")
     
-    print("\n=== Analyzing predictions ===")
-    evaluator.analyze_predictions(cql, test_eps, top_n=3)
+    print("\\n=== Analyzing predictions ===")
+    cql_evaluator_obj.analyze_predictions(cql, test_eps, top_n=3) # Use renamed instance
 
     print("\\n=== Analyzing training logs (from d3rlpy output) ===")
     
-    # --- Find the latest d3rlpy log directory for the current run pattern ---
-    base_d3rlpy_runs_dir = Path("d3rlpy_logs") / "runs"
-    latest_log_dir = None
-    
-    if base_d3rlpy_runs_dir.exists() and base_d3rlpy_runs_dir.is_dir():
-        # Assuming args.logdir is like "runs/cql", we get "cql"
-        run_prefix = Path(args.logdir).name # e.g., "cql"
-        
-        # Find all subdirectories in base_d3rlpy_runs_dir that start with run_prefix + "_"
-        # e.g., cql_20250519162207
-        potential_dirs = sorted([
-            d for d in base_d3rlpy_runs_dir.iterdir() 
-            if d.is_dir() and d.name.startswith(f"{run_prefix}_")
-        ])
-        
-        if potential_dirs:
-            latest_log_dir = potential_dirs[-1] # Get the last one (latest timestamp)
-            print(f"ℹ️  Found latest d3rlpy log directory for plotting: {latest_log_dir}")
-        else:
-            print(f"⚠️  Warning: No timestamped log directories found matching prefix '{run_prefix}_' in {base_d3rlpy_runs_dir}")
-    else:
-        print(f"⚠️  Warning: Base d3rlpy runs directory not found at {base_d3rlpy_runs_dir}")
+    # --- The logic to find the latest d3rlpy log directory has been moved up ---
+    # --- and its result is stored in 'latest_log_dir_for_outputs' ---
 
     # Ensure the directory exists before trying to analyze logs
-    if latest_log_dir and latest_log_dir.exists() and latest_log_dir.is_dir():
-        utils.check_gradient_values(latest_log_dir)
-        utils.plot_training_curves(latest_log_dir)
+    if latest_log_dir_for_outputs and latest_log_dir_for_outputs.exists() and latest_log_dir_for_outputs.is_dir():
+        utils.check_gradient_values(latest_log_dir_for_outputs)
+        utils.plot_training_curves(latest_log_dir_for_outputs)
     else:
-        print(f"⚠️  Warning: d3rlpy log directory for plotting not found or not valid, skipping plot generation.")
+        print(f"⚠️  Warning: d3rlpy log directory ({latest_log_dir_for_outputs if latest_log_dir_for_outputs else 'not found'}) for plotting training curves not found or not valid, skipping plot generation.")
 
     print("\\n=== Saving results ===")
     config.save_metrics(metrics, paths["metric_path"])
@@ -250,8 +270,8 @@ def main():
 
         # 4) training-log sanity checks
         print("Running training stability validation...")
-        if latest_log_dir and latest_log_dir.exists():
-            stability_result = validator.validate_training_stability(latest_log_dir)
+        if latest_log_dir_for_outputs and latest_log_dir_for_outputs.exists(): # Use the determined log dir
+            stability_result = validator.validate_training_stability(latest_log_dir_for_outputs)
             if not stability_result["passed"]:
                 print(f"❌ Training stability issues found: {stability_result['errors']}")
             if stability_result["warnings"]:
