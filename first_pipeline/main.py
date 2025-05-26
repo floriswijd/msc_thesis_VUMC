@@ -232,6 +232,30 @@ def main():
     else:
         print(f"⚠️  Warning: d3rlpy log directory ({latest_log_dir_for_outputs if latest_log_dir_for_outputs else 'not found'}) for plotting training curves not found or not valid, skipping plot generation.")
 
+    print("\n=== Feature Importance Analysis ===")
+    from feature_importance import analyze_feature_importance
+    
+    # Run feature importance analysis
+    importance_results = analyze_feature_importance(
+        cql, 
+        test_eps, 
+        data_dict["state_columns"], 
+        save_dir=evaluation_results_save_dir / "feature_importance"
+    )
+    
+    print("🔍 Feature Importance Results:")
+    if 'shap' in importance_results and importance_results['shap'] is not None:
+        shap_df = importance_results['shap']['feature_importance']
+        print(f"📊 Top 5 features (SHAP):")
+        for i, row in shap_df.head(5).iterrows():
+            print(f"   {i+1}. {row['feature']}: {row['importance']:.4f}")
+    
+    if 'permutation' in importance_results and importance_results['permutation'] is not None:
+        perm_df = importance_results['permutation']['feature_importance']
+        print(f"🔄 Top 5 features (Permutation):")
+        for i, row in perm_df.head(5).iterrows():
+            print(f"   {i+1}. {row['feature']}: {row['importance_mean']:.4f}")
+
     print("\\n=== Saving results ===")
     config.save_metrics(metrics, paths["metric_path"])
     model.save_model(cql, paths["model_path"])

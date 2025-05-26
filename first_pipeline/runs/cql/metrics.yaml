@@ -1,13 +1,13 @@
 alpha: 0.5
 batch_size: 256
-epochs: 5
+epochs: 60
 gamma: 0.99
 learning_rate: 0.001
-mean_action_agreement: 0.6718682377805529
+mean_action_agreement: 0.6703144337791626
 mean_episode_length: 29.9921875
 mean_return: 3.8503544330596924
 model_type: CQL
-std_action_agreement: 0.24970955474678058
+std_action_agreement: 0.24953678141557029
 std_return: 4.10640287399292
 total_episodes: 384
 total_transitions: 11517
