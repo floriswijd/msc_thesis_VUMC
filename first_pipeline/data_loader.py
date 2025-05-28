@@ -27,7 +27,25 @@ def preprocess_data(df):
         "ep_start_ts",
         "o2_delivery_device_1",
         "humidifier_water_changed",
+        "o2_flow",           # Current flow rate - this is what we're trying to choose!
+        "fio2",              # Current FiO2 - this is what we're trying to choose!
+        "flow_bin",          # Binned current flow rate
+        "fio2_bin",          # Binned current FiO2  
+        "fio2_fraction",   
+        "fio2_frac",
+        "inspired_gas_temp", # Current temperature setting
+        "humidification_Active",
+        "humidification_HME",
+        "humidification_nan",
+        "episode_len"
+        
+        # 🚨 CRITICAL: Exclude future information (temporal leakage)
+        "spo2_next",         # Next timestep's SpO2 - this is in the future!
+        
+        # 🚨 CRITICAL: Exclude reward components (target leakage)
+        "r_A", "r_B", "r_C", "r_D",  # Individual reward components
     ]
+    
     state_cols = []
     for col in df.columns:
         if col not in columns_to_exclude:

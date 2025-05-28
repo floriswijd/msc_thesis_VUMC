@@ -79,8 +79,12 @@ class CQLEvaluator:
         print("📊 Evaluating basic performance metrics...")
         
         returns = []
-        action_agreements = []
         episode_lengths = []
+        
+        # Step-level action comparison
+        all_predicted_actions = []
+        all_clinician_actions = []
+        prediction_errors = 0
         
         for episode in test_episodes:
             # Episode return
@@ -90,26 +94,56 @@ class CQLEvaluator:
             # Episode length
             episode_lengths.append(len(episode.observations))
             
-            # Action agreement with clinician policy
-            predicted_actions = []
-            for obs in episode.observations:
+            # Step-level action agreement
+            for obs, clinician_action in zip(episode.observations, episode.actions):
                 try:
-                    action = self.model.predict(obs.reshape(1, -1))[0]
-                    predicted_actions.append(action)
-                except:
-                    predicted_actions.append(0)  # Default action
+                    predicted_action = self.model.predict(obs.reshape(1, -1))[0]
+                    
+                    # Convert to scalar if needed
+                    if isinstance(predicted_action, np.ndarray):
+                        predicted_action = predicted_action.item() if predicted_action.size == 1 else predicted_action[0]
+                    if isinstance(clinician_action, np.ndarray):
+                        clinician_action = clinician_action.item() if clinician_action.size == 1 else clinician_action[0]
+                    
+                    all_predicted_actions.append(int(predicted_action))
+                    all_clinician_actions.append(int(clinician_action))
+                    
+                except Exception as e:
+                    prediction_errors += 1
+                    continue
+    
+        # Calculate step-level agreement
+        if all_predicted_actions and all_clinician_actions:
+            step_agreements = np.array(all_predicted_actions) == np.array(all_clinician_actions)
+            mean_action_agreement = float(np.mean(step_agreements))
             
-            agreement = np.mean(np.array(predicted_actions) == episode.actions)
-            action_agreements.append(agreement)
+            # For standard deviation, calculate per-episode agreements
+            episode_agreements = []
+            start_idx = 0
+            for episode in test_episodes:
+                end_idx = start_idx + len(episode.observations) - prediction_errors
+                if end_idx > start_idx:
+                    episode_step_agreements = step_agreements[start_idx:end_idx]
+                    if len(episode_step_agreements) > 0:
+                        episode_agreements.append(np.mean(episode_step_agreements))
+                start_idx = end_idx
+            
+            std_action_agreement = float(np.std(episode_agreements)) if episode_agreements else 0.0
+        else:
+            mean_action_agreement = 0.0
+            std_action_agreement = 0.0
         
         return {
             'mean_return': float(np.mean(returns)),
             'std_return': float(np.std(returns)),
             'mean_episode_length': float(np.mean(episode_lengths)),
-            'mean_action_agreement': float(np.mean(action_agreements)),
-            'std_action_agreement': float(np.std(action_agreements)),
+            'mean_action_agreement': mean_action_agreement,  # Step-level agreement
+            'std_action_agreement': std_action_agreement,
             'total_episodes': len(test_episodes),
-            'total_transitions': sum(episode_lengths)
+            'total_transitions': sum(episode_lengths),
+            'total_predictions': len(all_predicted_actions),
+            'prediction_errors': prediction_errors,
+            'step_level_agreements': int(np.sum(step_agreements)) if all_predicted_actions else 0
         }
     
     def _evaluate_clinical_performance(self, test_episodes):
