@@ -37,11 +37,10 @@ def preprocess_data(df):
         "humidification_Active",
         "humidification_HME",
         "humidification_nan",
-        "episode_len"
+        "episode_len",
         
         # 🚨 CRITICAL: Exclude future information (temporal leakage)
-        "spo2_next",         # Next timestep's SpO2 - this is in the future!
-        
+        "spo2_next",         # Next timestep's SpO2 - this is in the future!        
         # 🚨 CRITICAL: Exclude reward components (target leakage)
         "r_A", "r_B", "r_C", "r_D",  # Individual reward components
     ]
