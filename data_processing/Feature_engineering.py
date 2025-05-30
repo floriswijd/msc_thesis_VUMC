@@ -41,7 +41,7 @@ df["episode_len"] = df.groupby(
 ).transform("size")
 
 df["sf_ratio"] = df["spo2"] / df["fio2_frac"]          # SpO2 uses %, FiO2 fraction
-df["pf_ratio"] = df["pao2"] / df["fio2_frac"]        # PaO2 uses mmHg, FiO2 fraction
+df["pf_ratio"] = df["pao2"] / df["fio2_frac"]    # PaO2 uses mmHg, FiO2 fraction
 
 df["mask_wean"] = (
     (df["rox_class"] == "high") |                       # ROX-high risk

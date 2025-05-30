@@ -253,8 +253,21 @@ def main():
     if 'permutation' in importance_results and importance_results['permutation'] is not None:
         perm_df = importance_results['permutation']['feature_importance']
         print(f"🔄 Top 5 features (Permutation):")
-        for i, row in perm_df.head(5).iterrows():
-            print(f"   {i+1}. {row['feature']}: {row['importance_mean']:.4f}")
+        
+        # Check which column name is available
+        if 'action_flip_rate' in perm_df.columns:
+            # New direct permutation method
+            for i, row in perm_df.head(5).iterrows():
+                print(f"   {i+1}. {row['feature']}: {row['action_flip_rate']:.4f}")
+        elif 'importance_mean' in perm_df.columns:
+            # Old surrogate method (fallback)
+            for i, row in perm_df.head(5).iterrows():
+                print(f"   {i+1}. {row['feature']}: {row['importance_mean']:.4f}")
+        else:
+            # Generic handling
+            importance_col = perm_df.columns[1]  # Second column after 'feature'
+            for i, row in perm_df.head(5).iterrows():
+                print(f"   {i+1}. {row['feature']}: {row[importance_col]:.4f}")
 
     print("\\n=== Saving results ===")
     config.save_metrics(metrics, paths["metric_path"])

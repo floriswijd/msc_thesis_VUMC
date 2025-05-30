@@ -18,7 +18,7 @@ try:
     SHAP_AVAILABLE = True
 except ImportError:
     SHAP_AVAILABLE = False
-    print("⚠️  SHAP not available. Install with: pip install shap")
+    print("⚠️  SHAP not available")
 
 class CQLFeatureImportanceAnalyzer:
     """Comprehensive feature importance analysis for CQL models"""
@@ -84,124 +84,296 @@ class CQLFeatureImportanceAnalyzer:
         return np.array(states_list), np.array(actions_list)
     
     def _shap_analysis(self, states, actions, save_dir):
-        """SHAP-based feature importance analysis"""
-        print("🎯 Running SHAP analysis...")
-        
+        """SHAP-based feature importance analysis with GradientExplainer for PyTorch"""
+        print("🎯 Running SHAP analysis with GradientExplainer...")
         try:
-            # Create a wrapper function for the model
-            def model_predict_proba(X):
-                """Convert CQL model to probability distribution over actions"""
-                batch_size = X.shape[0]
-                action_probs = np.zeros((batch_size, 12))  # Assuming 12 actions
-                
-                for i, state in enumerate(X):
-                    try:
-                        # Get Q-values for all actions
-                        q_values = []
-                        for action in range(12):
-                            if hasattr(self.model, 'predict_value'):
-                                q_val = self.model.predict_value(
-                                    state.reshape(1, -1), 
-                                    np.array([[action]], dtype=np.int64)
-                                ).item()
-                                q_values.append(q_val)
-                            else:
-                                # Fallback: predict action and create one-hot
-                                pred_action = self.model.predict(state.reshape(1, -1))[0]
-                                q_values = [1.0 if a == pred_action else 0.0 for a in range(12)]
-                                break
-                        
-                        # Convert Q-values to probabilities using softmax
-                        if len(q_values) == 12:
-                            q_values = np.array(q_values)
-                            # Apply temperature scaling for better probability distribution
-                            temperature = 1.0
-                            exp_q = np.exp(q_values / temperature)
-                            action_probs[i] = exp_q / np.sum(exp_q)
-                        else:
-                            # Uniform distribution as fallback
-                            action_probs[i] = np.ones(12) / 12
-                    except Exception as e:
-                        print(f"Error in SHAP prediction for sample {i}: {e}")
-                        action_probs[i] = np.ones(12) / 12
-                
-                return action_probs
+            import torch
+            import shap
             
-            # Sample data for SHAP (computationally expensive)
+            # Access the Q-function from d3rlpy's DiscreteCQLImpl
+            if hasattr(self.model, '_impl') and self.model._impl is not None:
+                # d3rlpy 2.x uses _impl
+                q_func_list = self.model._impl.q_function  # This is a ModuleList
+                print("✅ Accessed Q-function via _impl.q_function")
+            elif hasattr(self.model, 'impl') and self.model.impl is not None:
+                # d3rlpy 1.x uses impl
+                q_func_list = self.model.impl.q_function   # This is a ModuleList
+                print("✅ Accessed Q-function via impl.q_function")
+            else:
+                raise AttributeError("Cannot access underlying PyTorch Q-function")
+            
+            # Handle ModuleList - take the first Q-network
+            if isinstance(q_func_list, torch.nn.ModuleList):
+                q_func = q_func_list[0]  # Use the first Q-network
+                print(f"📊 Using first Q-network from ModuleList: {type(q_func)}")
+            else:
+                q_func = q_func_list
+                
+            # Verify we have a PyTorch module
+            if not isinstance(q_func, torch.nn.Module):
+                raise TypeError(f"Q-function is not a PyTorch module: {type(q_func)}")
+            
+            print(f"📊 Q-function type: {type(q_func)}")
+            print(f"📊 Q-function device: {next(q_func.parameters()).device}")
+            
+            # Sample data for SHAP analysis
             sample_size = min(100, len(states))
             sample_indices = np.random.choice(len(states), sample_size, replace=False)
             states_sample = states[sample_indices]
             
-            # Create SHAP explainer
-            explainer = shap.Explainer(model_predict_proba, states_sample[:50])
-            shap_values = explainer(states_sample)
+            # Background data for on-manifold perturbations
+            background_size = min(50, len(states))
+            background_indices = np.random.choice(len(states), background_size, replace=False)
+            background_states = states[background_indices]
             
-            # Calculate feature importance
-            feature_importance = np.abs(shap_values.values).mean(axis=(0, 2))
+            # Get device from Q-function
+            device = next(q_func.parameters()).device
             
-            # Create SHAP summary plot
+            # Convert to PyTorch tensors on correct device
+            background_tensor = torch.tensor(background_states, dtype=torch.float32).to(device)
+            states_tensor = torch.tensor(states_sample, dtype=torch.float32).to(device)
+            
+            # Create a proper wrapper for the Q-function that works with GradientExplainer
+            class QValueWrapper(torch.nn.Module):
+                def __init__(self, q_network):
+                    super().__init__()
+                    self.q_network = q_network
+                    
+                def forward(self, x):
+                    """Return Q-values - ensure proper shape for SHAP"""
+                    # Get Q-values - d3rlpy returns QFunctionOutput object
+                    q_output = self.q_network(x)
+                    
+                    # Extract the actual tensor from QFunctionOutput
+                    if hasattr(q_output, 'q_value'):
+                        q_values = q_output.q_value  # Shape: (batch_size, n_actions)
+                    elif hasattr(q_output, 'values'):
+                        q_values = q_output.values
+                    elif hasattr(q_output, 'tensor'):
+                        q_values = q_output.tensor
+                    elif isinstance(q_output, torch.Tensor):
+                        q_values = q_output
+                    else:
+                        raise TypeError(f"Could not extract tensor from Q-function output: {type(q_output)}")
+                    
+                    # Return the Q-value for the best action but keep 2D shape for SHAP
+                    best_q_values = torch.max(q_values, dim=1)[0]  # Shape: (batch_size,)
+                    
+                    # SHAP expects 2D output, so reshape to (batch_size, 1)
+                    return best_q_values.unsqueeze(1)
+        
+            # Test the wrapper first to debug
+            print("🔧 Testing Q-function wrapper...")
+            test_input = background_tensor[:2]  # Use 2 samples for testing
+            
+            with torch.no_grad():
+                test_output = q_func(test_input)
+                print(f"📊 Q-function raw output type: {type(test_output)}")
+                print(f"📊 Q-function output has q_value: {hasattr(test_output, 'q_value')}")
+                
+                if hasattr(test_output, 'q_value'):
+                    q_tensor = test_output.q_value
+                    print(f"📊 Found q_value attribute: {type(q_tensor)}, shape: {q_tensor.shape}")
+        
+            # Create wrapper model
+            wrapper_model = QValueWrapper(q_func)
+            wrapper_model.eval()
+            
+            # Test the complete wrapper
+            print("🔧 Testing complete wrapper...")
+            with torch.no_grad():
+                test_wrapper_output = wrapper_model(test_input)
+                print(f"📊 Wrapper output shape: {test_wrapper_output.shape}")
+                print(f"📊 Wrapper output sample: {test_wrapper_output[:3]}")
+        except Exception as e:
+            print(f"❌ SHAP GradientExplainer failed: {e}")
+            import traceback
+            traceback.print_exc()
+            return None        
+        # Try GradientExplainer with the Q-function wrapper
+        print("🔧 Creating SHAP GradientExplainer...")
+        
+        # Use GradientExplainer for PyTorch models
+        explainer = shap.GradientExplainer(wrapper_model, background_tensor)
+        shap_values = explainer.shap_values(states_tensor)
+        
+        # Convert to numpy if it's a tensor
+        if isinstance(shap_values, torch.Tensor):
+            shap_values = shap_values.detach().cpu().numpy()
+        
+        # If shap_values is a list, take first element
+        if isinstance(shap_values, list):
+            shap_values = shap_values[0]
+            if isinstance(shap_values, torch.Tensor):
+                shap_values = shap_values.detach().cpu().numpy()
+        
+        # Handle 3D SHAP values (samples, features, outputs) -> (samples, features)
+        if shap_values.ndim == 3:
+            shap_values = shap_values.squeeze(-1)  # Remove last dimension if it's 1
+        
+        print(f"📊 SHAP values shape: {shap_values.shape}")
+        
+        # Calculate feature importance (absolute mean SHAP values)
+        feature_importance = np.abs(shap_values).mean(axis=0)
+        
+        # Create feature importance dataframe
+        importance_df = pd.DataFrame({
+            'feature': self.state_columns,
+            'importance': feature_importance
+        }).sort_values('importance', ascending=False)
+        
+        # Generate visualizations
+        self._generate_shap_plots(shap_values, states_sample, importance_df, save_dir)
+        
+        print(f"✅ SHAP analysis completed successfully!")
+        print(f"📊 Top 5 most important features:")
+        for i, (_, row) in enumerate(importance_df.head(5).iterrows(), 1):
+            print(f"   {i}. {row['feature']}: {row['importance']:.4f}")
+        
+        return {
+            'feature_importance': importance_df,
+            'shap_values': shap_values,
+            'method': 'SHAP GradientExplainer (PyTorch)',
+            'q_function_type': str(type(q_func)),
+            'device': str(device)
+        }
+        
+        
+
+
+    def _generate_shap_plots(self, shap_values, states_sample, importance_df, save_dir):
+        """Generate SHAP visualizations"""
+        try:
+            # SHAP summary plot
             plt.figure(figsize=(12, 8))
-            shap.summary_plot(shap_values[:, :, 0], states_sample, 
-                            feature_names=self.state_columns, show=False)
-            plt.title('SHAP Summary Plot - Feature Importance for Action 0')
+            shap.summary_plot(
+                shap_values, 
+                states_sample, 
+                feature_names=self.state_columns, 
+                show=False,
+                max_display=20
+            )
+            plt.title('SHAP Summary Plot - Feature Importance for Q-Value Prediction')
             plt.tight_layout()
             plt.savefig(save_dir / 'shap_summary_plot.png', dpi=300, bbox_inches='tight')
             plt.close()
             
-            # Feature importance ranking
-            importance_df = pd.DataFrame({
-                'feature': self.state_columns,
-                'importance': feature_importance
-            }).sort_values('importance', ascending=False)
+            # SHAP waterfall plot for first prediction
+            try:
+                plt.figure(figsize=(10, 8))
+                explanation = shap.Explanation(
+                    values=shap_values[0],
+                    base_values=0.0,  # Assume zero baseline for Q-values
+                    data=states_sample[0],
+                    feature_names=self.state_columns
+                )
+                shap.waterfall_plot(explanation, show=False, max_display=15)
+                plt.title('SHAP Waterfall Plot - Single Prediction Example')
+                plt.tight_layout()
+                plt.savefig(save_dir / 'shap_waterfall_plot.png', dpi=300, bbox_inches='tight')
+                plt.close()
+            except Exception as e:
+                print(f"⚠️ Could not generate waterfall plot: {e}")
             
-            return {
-                'feature_importance': importance_df,
-                'shap_values': shap_values,
-                'method': 'SHAP'
-            }
+            # Feature importance bar plot
+            plt.figure(figsize=(12, 8))
+            top_features = importance_df.head(20)
+            y_pos = np.arange(len(top_features))
+            
+            plt.barh(y_pos, top_features['importance'])
+            plt.yticks(y_pos, top_features['feature'])
+            plt.xlabel('Mean |SHAP Value|')
+            plt.title('SHAP Feature Importance - Top 20 Features')
+            plt.gca().invert_yaxis()
+            plt.grid(True, alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(save_dir / 'shap_feature_importance.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            # Save to CSV
+            importance_df.to_csv(save_dir / 'shap_feature_importance.csv', index=False)
             
         except Exception as e:
-            print(f"SHAP analysis failed: {e}")
-            return None
+            print(f"⚠️ Error generating SHAP plots: {e}")
     
-    def _permutation_importance(self, states, actions, save_dir):
-        """Permutation-based feature importance"""
-        print("🔄 Running permutation importance analysis...")
+    # def _permutation_importance(self, states, actions, save_dir):
+    #     """Permutation-based feature importance"""
+    #     print("🔄 Running permutation importance analysis...")
         
-        try:
-            # Create a surrogate model to approximate the CQL policy
-            rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
+    #     try:
+    #         # Create a surrogate model to approximate the CQL policy
+    #         rf_model = RandomForestClassifier(n_estimators=100, random_state=42)
             
-            # Get predicted actions from CQL model
-            predicted_actions = []
-            for state in states:
-                pred_action = self.model.predict(state.reshape(1, -1))[0]
-                predicted_actions.append(pred_action)
+    #         # Get predicted actions from CQL model
+    #         predicted_actions = []
+    #         for state in states:
+    #             pred_action = self.model.predict(state.reshape(1, -1))[0]
+    #             predicted_actions.append(pred_action)
             
-            # Train surrogate model
-            rf_model.fit(states, predicted_actions)
+    #         # Train surrogate model
+    #         rf_model.fit(states, predicted_actions)
             
-            # Calculate permutation importance
-            perm_importance = permutation_importance(
-                rf_model, states, predicted_actions, 
-                n_repeats=10, random_state=42, scoring='accuracy'
-            )
+    #         # Calculate permutation importance
+    #         perm_importance = permutation_importance(
+    #             rf_model, states, predicted_actions, 
+    #             n_repeats=10, random_state=42, scoring='accuracy'
+    #         )
             
-            # Create importance dataframe
-            importance_df = pd.DataFrame({
-                'feature': self.state_columns,
-                'importance_mean': perm_importance.importances_mean,
-                'importance_std': perm_importance.importances_std
-            }).sort_values('importance_mean', ascending=False)
+    #         # Create importance dataframe
+    #         importance_df = pd.DataFrame({
+    #             'feature': self.state_columns,
+    #             'importance_mean': perm_importance.importances_mean,
+    #             'importance_std': perm_importance.importances_std
+    #         }).sort_values('importance_mean', ascending=False)
             
-            return {
-                'feature_importance': importance_df,
-                'method': 'Permutation Importance'
-            }
+    #         return {
+    #             'feature_importance': importance_df,
+    #             'method': 'Permutation Importance'
+            # }
             
         except Exception as e:
             print(f"Permutation importance analysis failed: {e}")
             return None
+    
+    # HIGH PRIORITY: Fix permutation importance first
+    def _permutation_importance(self, states, actions, save_dir):
+        """Direct permutation on CQL model (no surrogate)"""
+        print("🔄 Running direct permutation importance analysis...")
+        
+        # Get baseline predictions
+        baseline_actions = []
+        for state in states:
+            action = self.model.predict(state.reshape(1, -1))[0]
+            baseline_actions.append(action)
+        baseline_actions = np.array(baseline_actions)
+        
+        flip_rates = []
+        for feat_idx, feature in enumerate(self.state_columns):
+            # Shuffle this feature across states
+            states_shuffled = states.copy()
+            np.random.shuffle(states_shuffled[:, feat_idx])
+            
+            # Get predictions on shuffled data
+            shuffled_actions = []
+            for state in states_shuffled:
+                action = self.model.predict(state.reshape(1, -1))[0]
+                shuffled_actions.append(action)
+            shuffled_actions = np.array(shuffled_actions)
+            
+            # Calculate action flip rate
+            flip_rate = (baseline_actions != shuffled_actions).mean()
+            flip_rates.append(flip_rate)
+        
+        # Create results
+        importance_df = pd.DataFrame({
+            'feature': self.state_columns,
+            'action_flip_rate': flip_rates
+        }).sort_values('action_flip_rate', ascending=False)
+        
+        return {
+            'feature_importance': importance_df,
+            'method': 'Direct Permutation (Action Flip Rate)'
+        }
     
     def _qvalue_sensitivity_analysis(self, states, save_dir):
         """Analyze Q-value sensitivity to feature changes"""
