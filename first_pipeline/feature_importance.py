@@ -117,12 +117,12 @@ class CQLFeatureImportanceAnalyzer:
             print(f"📊 Q-function device: {next(q_func.parameters()).device}")
             
             # Sample data for SHAP analysis
-            sample_size = min(100, len(states))
+            sample_size = min(500, len(states))
             sample_indices = np.random.choice(len(states), sample_size, replace=False)
             states_sample = states[sample_indices]
             
             # Background data for on-manifold perturbations
-            background_size = min(50, len(states))
+            background_size = min(200, len(states))
             background_indices = np.random.choice(len(states), background_size, replace=False)
             background_states = states[background_indices]
             
