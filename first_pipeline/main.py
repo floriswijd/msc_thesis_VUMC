@@ -179,6 +179,7 @@ def main():
         print(f"🏥 Safety Violation Rate: {cp['safety_violation_rate']:.3f}")
         print(f"🏥 Parameter Appropriateness: {cp['parameter_appropriateness_score']:.3f}")
         print(f"🏥 Outcome Improvement vs Clinicians: {cp['outcome_improvement']:.3f}")
+        print(f"")
     
     if 'statistical_analysis' in comprehensive_results:
         sa = comprehensive_results['statistical_analysis']

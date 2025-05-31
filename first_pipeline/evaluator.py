@@ -20,9 +20,9 @@ class CQLEvaluator:
         
         # Clinical parameter ranges for HFNC (based on literature)
         self.clinical_ranges = {
-            'flow_rate': {'min': 10, 'max': 60, 'unit': 'L/min'},  # Typical HFNC flow range
-            'fio2': {'min': 0.21, 'max': 1.0, 'unit': 'fraction'},  # FiO2 range
-            'temperature': {'min': 34, 'max': 40, 'unit': '°C'}     # If temperature is controlled
+            'flow_rate': {'min': 10, 'max': 70, 'unit': 'L/min'},  # Typical HFNC flow range
+            'fio2': {'min': 0.21, 'max': 1.0, 'unit': 'fraction'}  # FiO2 range
+            # 'temperature': {'min': 34, 'max': 40, 'unit': '°C'}     # If temperature is controlled
         }
     
     def add_training_params_to_metrics(self, metrics, args):
