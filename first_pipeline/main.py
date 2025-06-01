@@ -73,7 +73,28 @@ def main():
         if not train_eps:
             print("\n❌ Error: No training episodes after split. Exiting.")
             sys.exit(1)
-        # train_dataset = dataset.MDPDataset(episodes=train_eps) <- #can't do this gives an error
+        
+        # ADD THIS: Count transitions in each split
+        train_transitions = dataset.count_transitions(train_eps)
+        val_transitions = dataset.count_transitions(val_eps)
+        test_transitions = dataset.count_transitions(test_eps)
+        total_transitions = train_transitions + val_transitions + test_transitions
+        
+        print(f"\n📊 Dataset Split Summary:")
+        print(f"   Training:   {len(train_eps):,} episodes, {train_transitions:,} transitions ({100*train_transitions/total_transitions:.1f}%)")
+        print(f"   Validation: {len(val_eps):,} episodes, {val_transitions:,} transitions ({100*val_transitions/total_transitions:.1f}%)")
+        print(f"   Test:       {len(test_eps):,} episodes, {test_transitions:,} transitions ({100*test_transitions/total_transitions:.1f}%)")
+        print(f"   Total:      {len(train_eps + val_eps + test_eps):,} episodes, {total_transitions:,} transitions")
+        
+        # Average episode lengths
+        avg_train_len = train_transitions / len(train_eps) if train_eps else 0
+        avg_val_len = val_transitions / len(val_eps) if val_eps else 0
+        avg_test_len = test_transitions / len(test_eps) if test_eps else 0
+        
+        print(f"\n📏 Average Episode Lengths:")
+        print(f"   Training:   {avg_train_len:.1f} transitions/episode")
+        print(f"   Validation: {avg_val_len:.1f} transitions/episode")
+        print(f"   Test:       {avg_test_len:.1f} transitions/episode")
 
     except Exception as e:
         print(f"\n❌ Error creating dataset: {e}")
