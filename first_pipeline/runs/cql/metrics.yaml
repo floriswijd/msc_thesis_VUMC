@@ -3,14 +3,14 @@ batch_size: 256
 epochs: 5
 gamma: 0.8
 learning_rate: 0.01
-mean_action_agreement: 0.6978379786402709
+mean_action_agreement: 0.7200659894069636
 mean_episode_length: 29.9921875
 mean_return: 3.8503544330596924
 model_type: CQL
 prediction_errors: 0
-std_action_agreement: 0.31041162145949275
+std_action_agreement: 0.3094759293224174
 std_return: 4.10640287399292
-step_level_agreements: 8037
+step_level_agreements: 8293
 total_episodes: 384
 total_predictions: 11517
 total_transitions: 11517
