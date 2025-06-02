@@ -15,9 +15,9 @@ def parse_args():
                         help="Number of training epochs (controls training duration)")
     parser.add_argument("--batch", type=int, default=256,
                         help="Batch size for training (impacts memory usage and training stability)")
-    parser.add_argument("--lr", type=float, default=1e-2,
+    parser.add_argument("--lr", type=float, default=1e-3,
                         help="Learning rate (controls optimization step size)")
-    parser.add_argument("--gamma", type=float, default=0.8,
+    parser.add_argument("--gamma", type=float, default=0.9,
                         help="Discount factor (determines importance of future vs immediate rewards)")
     parser.add_argument("--gpu", type=int, default=0,
                         help="-1 = CPU, >=0 = GPU device ID")

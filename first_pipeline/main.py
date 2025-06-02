@@ -34,10 +34,12 @@ import trainer     # Training orchestration
 import evaluator   # Model evaluation
 import utils       # Utility functions for debugging and visualization
 from validator import CQLValidator      
+import numpy as np
 
 def main():
     args = config.parse_args()
     paths = config.setup_paths(args)
+    
     device = "cpu"
     if args.gpu >= 0:
         try:
@@ -49,6 +51,7 @@ def main():
                 print("CUDA not available, falling back to CPU")
         except ImportError:
             print("PyTorch CUDA support not available, using CPU")
+    
     print("\n=== Loading and preprocessing data ===")
     df = data_loader.load_data(args.data)
     # cfg = config.load_config(args.cfg)
@@ -56,11 +59,11 @@ def main():
     data_dict = data_loader.preprocess_data(df)
     print("\n=== Creating dataset ===")
     try:
-        mdp_dataset_full = dataset.create_mdp_dataset( # Renamed for clarity
-            data_dict["states"],    # State features (observations)
-            data_dict["actions"],   # Actions taken by clinicians
-            data_dict["rewards"],   # Rewards (clinical outcomes)
-            data_dict["dones"]      # Episode termination flags
+        mdp_dataset_full = dataset.create_mdp_dataset(
+            data_dict["states"],
+            data_dict["actions"], 
+            data_dict["rewards"],
+            data_dict["dones"]
         )
         
         utils.debug_nan_values(data_dict["states"], "states")
@@ -68,7 +71,7 @@ def main():
         utils.debug_inf_values(data_dict["states"], "states")
         utils.debug_inf_values(data_dict["rewards"], "rewards")
         
-        train_eps, val_eps, test_eps = dataset.split_dataset(mdp_dataset_full) # Split the full dataset
+        train_eps, val_eps, test_eps = dataset.split_dataset(mdp_dataset_full)
 
         if not train_eps:
             print("\n❌ Error: No training episodes after split. Exiting.")
@@ -96,37 +99,37 @@ def main():
         print(f"   Validation: {avg_val_len:.1f} transitions/episode")
         print(f"   Test:       {avg_test_len:.1f} transitions/episode")
 
+        # ADD THIS: Determine n_actions from the data
+        if 'actions' in data_dict and data_dict['actions'] is not None:
+            n_actions = int(np.max(data_dict['actions'])) + 1
+            print(f"\n📊 Inferred n_actions from data: {n_actions}")
+        else:
+            print("\n❌ Cannot determine n_actions from data.")
+            sys.exit(1)
+
+        # ADD THIS: Initialize Behavior Policy Estimator BEFORE training
+        print("\n=== Initializing Enhanced Off-Policy Evaluation ===")
+        from evaluator import BehaviorPolicyEstimator
+        
+        behavior_policy_estimator = BehaviorPolicyEstimator(n_actions=n_actions)
+        print("🔧 Fitting behavior policy on training episodes...")
+        behavior_policy_estimator.fit(train_eps)  # Fit on training data
+
     except Exception as e:
         print(f"\n❌ Error creating dataset: {e}")
         sys.exit(1)
+
     print("\n=== Creating model ===")
     scaler = model.create_scaler()
     cql_config = model.create_cql_config(
-        batch_size=args.batch,    # Batch size for training updates
-        learning_rate=args.lr,    # Step size for optimizer
-        gamma=args.gamma,         # Discount factor for future rewards
-        alpha=args.alpha,         # CQL conservatism parameter
-        scaler=scaler             # Observation normalizer
+        batch_size=args.batch, learning_rate=args.lr, gamma=args.gamma,
+        alpha=args.alpha, scaler=scaler
     )
-    
-    try:
-        cql = model.create_cql_model(
-            config=cql_config,
-            device=device,         # CPU or specific GPU
-            enable_ddp=False       # No distributed training
-        )
-    except Exception as e:
-        print(f"\n❌ Error creating model: {e}")
-        sys.exit(1)
-    
-    print("\n=== Training model ===")
-    result, errors = trainer.train_model(
-        model=cql,                  # CQL model to train
-        train_episodes=train_eps,      # Pass the training-only dataset
-        n_epochs=args.epochs,       # Number of training epochs
-        experiment_name=args.logdir # Log directory name
-    )
+    cql = model.create_cql_model(config=cql_config, device=device)
 
+    print("\n=== Training model ===")
+    result, errors = trainer.train_model(model=cql, train_episodes=train_eps, n_epochs=args.epochs, experiment_name=args.logdir)
+    
     if errors:
         print("\\n⚠️ Training encountered errors, checking logs for diagnosis...")
         # Pass the corrected path to check_training_logs
@@ -197,9 +200,10 @@ def main():
     
     if 'clinical_performance' in comprehensive_results:
         cp = comprehensive_results['clinical_performance']
-        print(f"🏥 Safety Violation Rate: {cp['safety_violation_rate']:.3f}")
-        print(f"🏥 Parameter Appropriateness: {cp['parameter_appropriateness_score']:.3f}")
+        print(f"🏥 Predicted Outcome Mean: {cp['predicted_outcome_mean']:.3f}")
+        print(f"🏥 Clinician Outcome Mean: {cp['clinician_outcome_mean']:.3f}")
         print(f"🏥 Outcome Improvement vs Clinicians: {cp['outcome_improvement']:.3f}")
+        print(f"🏥 Total Actions Evaluated: {cp['total_actions_evaluated']}")
         print(f"")
     
     if 'statistical_analysis' in comprehensive_results:
@@ -212,6 +216,24 @@ def main():
         pa = comprehensive_results['policy_analysis']
         print(f"🎯 Policy Entropy: {pa['policy_entropy']:.3f}")
         print(f"🎯 Action Distribution: {dict(list(pa['action_distribution'].items())[:5])}")  # Show top 5
+
+    # In main.py, after comprehensive_results = cql_evaluator_obj.evaluate_comprehensive(...)
+    if 'weighted_importance_sampling' in comprehensive_results:
+        wis = comprehensive_results['weighted_importance_sampling']
+        print(f"\n🎯 Weighted Importance Sampling Results:")
+        print(f"   WIS Estimate: {wis['wis_estimate']:.4f}")
+        print(f"   Effective Sample Size: {wis['ess']:.2f}")
+        print(f"   Mean Trajectory Weight: {wis['mean_trajectory_weight']:.4f}")
+
+    if 'doubly_robust' in comprehensive_results:
+        dr = comprehensive_results['doubly_robust']
+        print(f"\n🎯 Doubly Robust Results:")
+        print(f"   DR Estimate: {dr['dr_estimate']:.4f}")
+
+    if 'fitted_q_evaluation' in comprehensive_results:
+        fqe = comprehensive_results['fitted_q_evaluation']
+        print(f"\n🎯 Fitted Q Evaluation Results:")
+        print(f"   FQE Estimate: {fqe['fqe_estimate']:.4f} ± {fqe['fqe_std']:.4f}")
     
     print(f"\\n📊 Academic visualizations and detailed report saved {save_location_message_suffix}")
     
