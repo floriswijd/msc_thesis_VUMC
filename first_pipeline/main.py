@@ -128,7 +128,7 @@ def main():
     cql = model.create_cql_model(config=cql_config, device=device)
 
     print("\n=== Training model ===")
-    result, errors = trainer.train_model(model=cql, train_episodes=train_eps, n_epochs=args.epochs, experiment_name=args.logdir)
+    result, errors = trainer.train_model(model=cql, train_episodes=train_eps, n_epochs=args.epochs, batch_size=args.batch, experiment_name=args.logdir)
     
     if errors:
         print("\\n⚠️ Training encountered errors, checking logs for diagnosis...")
