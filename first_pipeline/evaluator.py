@@ -61,7 +61,6 @@ class BehaviorPolicyEstimator:
         """Predict probability distribution over actions for given states."""
         if not self.is_fitted:
             return np.ones((states.shape[0], self.n_actions)) / self.n_actions
-
         try:
             if states.ndim == 1:
                 states = states.reshape(1, -1)
@@ -119,10 +118,20 @@ class BehaviorPolicyEstimator:
 class CQLEvaluator:
     """Comprehensive evaluation framework for CQL-based HFNC parameter optimization"""
     
-    def __init__(self, model, config_path=None, n_actions=None, behavior_policy_estimator=None):
+    def __init__(self, model, n_actions: int, behavior_policy_estimator: BehaviorPolicyEstimator, config_path=None):
         self.model = model
         self.config_path = config_path
         self.results = {}
+        self.n_actions = n_actions
+
+        if not isinstance(behavior_policy_estimator, BehaviorPolicyEstimator):
+            raise TypeError("behavior_policy_estimator must be an instance of BehaviorPolicyEstimator.")
+        if not behavior_policy_estimator.is_fitted:
+            # Or, you could allow it and have OPE methods check/fail later,
+            # but it's cleaner to enforce it here if OPE is a primary function.
+            # For now, a warning is fine as main.py is supposed to fit it.
+            print("⚠️ CQLEvaluator initialized with an unfitted BehaviorPolicyEstimator. OPE methods requiring it may fail or yield defaults.")
+
         
         # Determine n_actions
         self.n_actions = n_actions
@@ -136,9 +145,9 @@ class CQLEvaluator:
 
         # Set up behavior policy estimator
         self.behavior_policy_estimator = behavior_policy_estimator
-        if self.behavior_policy_estimator is None and self.n_actions is not None:
-            print("🔧 Creating default BehaviorPolicyEstimator...")
-            self.behavior_policy_estimator = BehaviorPolicyEstimator(n_actions=self.n_actions)
+        # if self.behavior_policy_estimator is None and self.n_actions is not None:
+        #     print("🔧 Creating default BehaviorPolicyEstimator...")
+        #     self.behavior_policy_estimator = BehaviorPolicyEstimator(n_actions=self.n_actions)
 
         # Clinical parameter ranges for HFNC (based on literature)
         self.clinical_ranges = {
@@ -164,10 +173,6 @@ class CQLEvaluator:
         
         print("🔬 Running comprehensive academic evaluation with enhanced OPE...")
         
-        # Fit behavior policy if not already fitted
-        if self.behavior_policy_estimator and not self.behavior_policy_estimator.is_fitted:
-            print("🔧 Fitting BehaviorPolicyEstimator on test episodes for OPE...")
-            self.behavior_policy_estimator.fit(test_episodes)
 
         # 1. Basic performance metrics
         basic_metrics = self._evaluate_basic_performance(test_episodes)
@@ -281,6 +286,78 @@ class CQLEvaluator:
         # Simplified outcome estimation - in practice this would be more sophisticated
         # For now, we'll use the actual rewards as a proxy for outcomes
         return np.array(rewards)
+    
+    def _get_target_policy_proba(self, states: np.ndarray, temperature=1.0) -> np.ndarray:
+        """
+        Estimates pi_CQL(a|s) from Q_CQL(s,a) using softmax.
+        """
+        if not hasattr(self.model, 'predict_value'):
+            print("⚠️ Model does not have 'predict_value' method. Cannot estimate target policy probabilities.")
+            if self.n_actions:
+                return np.ones((states.shape[0], self.n_actions)) / self.n_actions
+            raise ValueError("n_actions not set, cannot fallback for target policy.")
+
+        all_q_values = []
+        # Ensure states is 2D for iteration
+        if states.ndim == 1:
+            states_for_iteration = states.reshape(1, -1)
+        else:
+            states_for_iteration = states
+
+        for i in range(states_for_iteration.shape[0]):
+            state_input = states_for_iteration[i:i+1] # Keep it 2D for predict_value
+            q_values_for_state = []
+            for action_idx in range(self.n_actions):
+                action_arr = np.array([[action_idx]], dtype=np.int64)
+                try:
+                    q_val = self.model.predict_value(state_input, action_arr)
+                    # d3rlpy's predict_value might return a tensor or ndarray
+                    if hasattr(q_val, 'item'): # For single-element tensor/ndarray
+                        q_values_for_state.append(q_val.item())
+                    else: # Assuming it's already a scalar if no .item()
+                        q_values_for_state.append(float(q_val))
+                except Exception as e:
+                    # print(f"Debug: Error predicting value for state {state_input}, action {action_idx}: {e}")
+                    q_values_for_state.append(-np.inf) # Handle error by assigning a very low Q-value
+            all_q_values.append(q_values_for_state)
+
+        q_values_arr = np.array(all_q_values) 
+
+        q_values_stable = q_values_arr - np.max(q_values_arr, axis=1, keepdims=True)
+        exp_q = np.exp(q_values_stable / temperature)
+        policy_probas = exp_q / np.sum(exp_q, axis=1, keepdims=True)
+
+        nan_rows = np.isnan(policy_probas).any(axis=1)
+        if np.any(nan_rows):
+            policy_probas[nan_rows, :] = 1.0 / self.n_actions
+        return policy_probas
+
+    def _get_target_policy_action_probabilities(self, states: np.ndarray, actions: np.ndarray, temperature=1.0) -> np.ndarray:
+        """
+        Returns pi_CQL(a|s) for the specific actions taken.
+        """
+        target_probas_all = self._get_target_policy_proba(states, temperature)
+
+        if actions.ndim > 1:
+            actions = actions.flatten()
+        actions_int = actions.astype(int)
+
+        # Ensure actions are within bounds for indexing
+        if np.any(actions_int < 0) or np.any(actions_int >= self.n_actions):
+            print(f"⚠️ Warning: Target policy actions out of bounds for indexing. Min: {np.min(actions_int)}, Max: {np.max(actions_int)}, N_actions: {self.n_actions}")
+            clamped_actions = np.clip(actions_int, 0, self.n_actions - 1)
+            probs = target_probas_all[np.arange(states.shape[0]), clamped_actions]
+            # For actions that were out of bounds, assign a minimal probability
+            # This part might need more thought if it happens frequently.
+            out_of_bounds_mask = (actions_int < 0) | (actions_int >= self.n_actions)
+            probs[out_of_bounds_mask] = 1e-9 
+            return probs
+        else:
+            return target_probas_all[np.arange(states.shape[0]), actions_int]
+
+
+
+
 
     def _evaluate_clinical_performance(self, test_episodes):
         """Clinical relevance metrics (simplified)"""
@@ -410,49 +487,6 @@ class CQLEvaluator:
             'state_action_patterns': state_action_patterns[:100]  # Sample for analysis
         }
     
-    def _off_policy_evaluation(self, test_episodes):
-        """Off-policy evaluation metrics for thesis"""
-        print("🔄 Running off-policy evaluation...")
-        
-        # Importance sampling estimation
-        is_estimates = []
-        
-        # Weighted importance sampling
-        wis_estimates = []
-        
-        for episode in test_episodes:
-            behavior_prob = 1.0  # Assume uniform behavior policy
-            target_prob = 1.0
-            
-            for obs, action in zip(episode.observations, episode.actions):
-                try:
-                    # Estimate probability under learned policy
-                    predicted_action = self.model.predict(obs.reshape(1, -1))[0]
-                    
-                    # Simple probability estimation (would be more sophisticated in practice)
-                    if predicted_action == action:
-                        target_prob *= 0.8  # High probability for matching actions
-                    else:
-                        target_prob *= 0.2  # Low probability for non-matching
-                    
-                except:
-                    target_prob *= 0.5  # Neutral probability for errors
-            
-            importance_ratio = target_prob / behavior_prob if behavior_prob > 0 else 0
-            episode_return = np.sum(episode.rewards)
-            
-            is_estimates.append(importance_ratio * episode_return)
-            wis_estimates.append(importance_ratio)
-        
-        # Calculate final estimates
-        is_estimate = np.mean(is_estimates) if is_estimates else 0
-        wis_estimate = (np.sum(is_estimates) / np.sum(wis_estimates)) if np.sum(wis_estimates) > 0 else 0
-        
-        return {
-            'importance_sampling_estimate': float(is_estimate),
-            'weighted_importance_sampling_estimate': float(wis_estimate),
-            'estimation_variance': float(np.var(is_estimates)) if is_estimates else 0
-        }
     
     def analyze_predictions(self, model, test_episodes, top_n=3):
         """Analyze model predictions and compare with clinician decisions"""
@@ -783,46 +817,101 @@ class CQLEvaluator:
             f.write("The evaluation demonstrates the academic rigor and clinical relevance of the CQL model ")
             f.write("for HFNC parameter optimization, providing quantitative evidence for thesis contributions.\n")
 
-    def evaluate_wis(self, episodes, gamma=0.99, clip_ratio=None):
-        """Weighted Importance Sampling evaluation."""
-        print("🔄 Running Weighted Importance Sampling (WIS) evaluation...")
+    def evaluate_wis(self, episodes: list, gamma: float = 0.99, clip_ratio: float = None): # d3rlpy.dataset.Episode type hint removed for broader compatibility if needed
         
-        # Fit behavior policy if not already fitted
-        if self.behavior_policy_estimator and not self.behavior_policy_estimator.is_fitted:
-            print("🔧 Fitting BehaviorPolicyEstimator on episodes for WIS...")
-            self.behavior_policy_estimator.fit(episodes)
+        print("🔄 Evaluating with Weighted Importance Sampling (WIS)...")
+        if self.behavior_policy_estimator is None or not self.behavior_policy_estimator.is_fitted:
+            print("⚠️ Behavior policy estimator not available or not fitted. WIS cannot be computed.")
+            return {'wis_estimate': np.nan, 'ess': 0, 'mean_trajectory_weight': np.nan, 'max_trajectory_weight': np.nan, 'min_trajectory_weight': np.nan, 'all_trajectory_weights_sample': []}
 
-        all_weights = []
-        all_returns = []
-        
-        for episode_idx, episode in enumerate(episodes):
-            episode_return = np.sum(episode.rewards)
-            all_returns.append(episode_return)
+        if not self.n_actions:
+            print("⚠️ n_actions not set. Cannot compute target policy probabilities for WIS.")
+            return {'wis_estimate': np.nan, 'ess': 0, 'mean_trajectory_weight': np.nan, 'max_trajectory_weight': np.nan, 'min_trajectory_weight': np.nan, 'all_trajectory_weights_sample': []}
+
+        weighted_returns_sum = 0.0
+        sum_of_weights = 0.0
+        all_trajectory_weights = []
+
+        print(f"  WIS: Processing {len(episodes)} episodes. Gamma={gamma}, Clip Ratio={clip_ratio}")
+
+        for ep_idx, episode in enumerate(episodes):
+            if episode.size() == 0: # d3rlpy.dataset.Episode uses .size()
+                if ep_idx < 3: print(f"  WIS DEBUG (Ep {ep_idx}): Empty episode, skipping.")
+                continue
+
+            trajectory_reward_discounted = 0.0 # Accumulate discounted rewards for this trajectory
+            log_rho_product_for_trajectory = 0.0
+
+            if ep_idx < 1: # Debug print for first episode only
+                print(f"  WIS DEBUG (Ep {ep_idx}, Length {episode.size()}):")
+
+            for t in range(episode.size()):
+                state = episode.observations[t:t+1] 
+                action_from_data = np.array([episode.actions[t]], dtype=np.int64) 
+                reward = episode.rewards[t]
+
+                prob_b = self.behavior_policy_estimator.get_action_probabilities(state, action_from_data)[0]
+                prob_pi = self._get_target_policy_action_probabilities(state, action_from_data)[0]
+
+                # Ensure probabilities are not zero to avoid log(0) or division by zero
+                prob_b_clipped = np.maximum(prob_b, 1e-9)
+                prob_pi_clipped = np.maximum(prob_pi, 1e-9)
+
+                log_rho_step = np.log(prob_pi_clipped) - np.log(prob_b_clipped)
+
+                if clip_ratio is not None:
+                    rho_step = np.exp(log_rho_step)
+                    clipped_rho_step = np.clip(rho_step, 0, clip_ratio)
+                    log_rho_step = np.log(clipped_rho_step) if clipped_rho_step > 0 else -np.inf
+
+                log_rho_product_for_trajectory += log_rho_step
+                trajectory_reward_discounted += (gamma**t) * reward
+                reward_scalar = float(reward.item()) if hasattr(reward, 'item') else float(reward)
+                if ep_idx < 1 and t < 5: # Debug print for first 5 steps of first episode
+                    print(f"    t={t}: s_shape={state.shape}, a={action_from_data[0]}, r={reward_scalar:.4f}, pi_b(a|s)={prob_b:.4e}, pi_CQL(a|s)={prob_pi:.4e}, log_rho_step={log_rho_step:.4f}")
+
+
             
-            # Calculate importance weights
-            weights = []
-            for step_idx, (obs, action) in enumerate(zip(episode.observations, episode.actions)):
-                prob = self.behavior_policy_estimator.get_action_probabilities(obs, action)
-                weight = 1.0 / prob if prob > 0 else 0
-                weights.append(weight)
-            
-            # Clip weights to avoid extreme values
-            if clip_ratio is not None:
-                weights = np.clip(weights, 0, clip_ratio)
-            
-            all_weights.append(np.prod(weights))
-        
-        # Calculate WIS estimate
-        wis_estimate = np.mean(np.array(all_weights) * np.array(all_returns)) if all_returns else 0
-        ess = self._calculate_effective_sample_size(all_weights)  # Effective Sample Size
-        
-        return {
+            current_trajectory_weight = np.exp(log_rho_product_for_trajectory)
+            all_trajectory_weights.append(current_trajectory_weight)
+
+            weighted_returns_sum += current_trajectory_weight * trajectory_reward_discounted # Use discounted return
+            sum_of_weights += current_trajectory_weight
+
+            trajectory_reward_discounted = float(trajectory_reward_discounted.item()) if hasattr(trajectory_reward_discounted, 'item') else float(trajectory_reward_discounted)
+            current_trajectory_weight = float(current_trajectory_weight.item()) if hasattr(current_trajectory_weight, 'item') else float(current_trajectory_weight)
+            log_rho_product_for_trajectory = float(log_rho_product_for_trajectory.item()) if hasattr(log_rho_product_for_trajectory, 'item') else float(log_rho_product_for_trajectory)
+
+            if ep_idx < 1: # Debug print for first episode only
+                print(f"  WIS DEBUG (Ep {ep_idx}): traj_discounted_R={trajectory_reward_discounted:.4f}, traj_weight={current_trajectory_weight:.4e}, cumulative_log_rho={log_rho_product_for_trajectory:.4f}")
+
+
+        if sum_of_weights == 0 or np.isinf(sum_of_weights) or np.isnan(sum_of_weights):
+            print(f"⚠️ WIS: Sum of weights is zero, inf, or nan ({sum_of_weights}). Cannot compute estimate.")
+            wis_estimate = np.nan
+            ess = 0.0
+        else:
+            wis_estimate = weighted_returns_sum / sum_of_weights
+            sum_of_squared_weights = np.sum(np.square(all_trajectory_weights))
+            if sum_of_squared_weights == 0 or np.isinf(sum_of_squared_weights) or np.isnan(sum_of_squared_weights):
+                ess = 0.0
+            else:
+                ess = (sum_of_weights**2) / sum_of_squared_weights
+
+        results = {
             'wis_estimate': float(wis_estimate),
-            'ess': ess,
-            'mean_trajectory_weight': float(np.mean(all_weights)),
-            'max_trajectory_weight': float(np.max(all_weights)),
-            'num_trajectories': len(all_weights)
+            'ess': float(ess),
+            'num_trajectories': len(episodes),
+            'mean_trajectory_weight': float(np.mean(all_trajectory_weights)) if all_trajectory_weights else np.nan,
+            'max_trajectory_weight': float(np.max(all_trajectory_weights)) if all_trajectory_weights else np.nan,
+            'min_trajectory_weight': float(np.min(all_trajectory_weights)) if all_trajectory_weights else np.nan,
+            'all_trajectory_weights_sample': [float(w) for w in all_trajectory_weights[:min(10, len(all_trajectory_weights))]] # Sample of weights
         }
+        print(f"  WIS Estimate: {results['wis_estimate']:.4f}, ESS: {results['ess']:.2f}")
+        if results['ess'] < len(episodes) / 10 and len(episodes) > 10:
+            print(f"  WIS WARNING: ESS ({results['ess']:.2f}) is very low compared to num_trajectories ({len(episodes)}). Results may be unreliable.")
+        print(f"  WIS Trajectory Weights: Min={results['min_trajectory_weight']:.2e}, Mean={results['mean_trajectory_weight']:.2e}, Max={results['max_trajectory_weight']:.2e}")
+        return results
     
     def evaluate_dr(self, episodes, gamma=0.99, clip_ratio=None):
         """Doubly Robust evaluation."""
@@ -955,12 +1044,17 @@ class CQLEvaluator:
     def _calculate_effective_sample_size(self, weights):
         """Calculate effective sample size for importance sampling"""
         if not weights or len(weights) == 0:
+            print("⚠️ No weights provided for ESS calculation.")
             return 0.0
         
         weights = np.array(weights)
         if np.sum(weights) == 0:
+            print("⚠️ Sum of weights is zero, cannot calculate ESS.")
             return 0.0
         
         normalized_weights = weights / np.sum(weights)
         ess = 1.0 / np.sum(normalized_weights ** 2)
+        if ess < 1:
+            print("⚠️ Effective sample size is less than 1, indicating poor quality of importance sampling.")
+            
         return float(ess)

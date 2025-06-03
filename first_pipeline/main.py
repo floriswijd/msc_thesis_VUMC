@@ -184,7 +184,7 @@ def main():
     # Use the new comprehensive evaluation framework
     from evaluator import CQLEvaluator
     
-    cql_evaluator_obj = CQLEvaluator(cql) # Renamed instance
+    cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
     comprehensive_results = cql_evaluator_obj.evaluate_comprehensive(test_eps, save_dir=evaluation_results_save_dir)
     
     # Also keep basic metrics for backward compatibility
