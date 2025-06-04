@@ -114,6 +114,13 @@ def main():
         behavior_policy_estimator = BehaviorPolicyEstimator(n_actions=n_actions)
         print("🔧 Fitting behavior policy on training episodes...")
         behavior_policy_estimator.fit(train_eps)  # Fit on training data
+        print("\n=== Behaviour-policy validation ===")
+        metrics_bp = BehaviorPolicyEstimator.evaluate_behaviour_model(
+            behavior_policy_estimator,
+            train_eps,                 # use a slice of training data
+            n_actions,
+            title="Train-split"
+)
 
     except Exception as e:
         print(f"\n❌ Error creating dataset: {e}")

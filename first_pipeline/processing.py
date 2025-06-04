@@ -3,7 +3,7 @@ import yaml
 from pathlib import Path
 
 TARGET_SPO2 = 94           # centre of desired range
-SETPOINT_K  = 8            # ±k → reward falls to 0
+SETPOINT_K  = 2          # ±k → reward falls to 0
 FLOW_COST   = 0.002        # per L/min
 FIO2_COST   = 0.005        # per % (use 0.5 % if you prefer frac)
 

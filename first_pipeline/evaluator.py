@@ -5,7 +5,8 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from scipy import stats
-from sklearn.metrics import confusion_matrix, classification_report, mean_squared_error, mean_absolute_error
+from sklearn.metrics import confusion_matrix, classification_report, mean_squared_error, mean_absolute_error, accuracy_score, log_loss, brier_score_loss
+from sklearn.calibration import calibration_curve
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from pathlib import Path
@@ -115,6 +116,58 @@ class BehaviorPolicyEstimator:
         else:
             return action_probas_all[np.arange(num_samples), actions]
 
+
+    def evaluate_behaviour_model(estimator, episodes, n_actions, title="Validation"):
+        """Return a dict with prob-quality metrics and plot a reliability diagram."""
+        # ---------- gather transitions -------------------------------------------------
+        X = np.concatenate([ep.observations for ep in episodes], axis=0)
+        y = np.concatenate([ep.actions.reshape(-1)   for ep in episodes], axis=0)
+
+        # ---------- quick 80/20 split ---------------------------------------------------
+        X_tr, X_va, y_tr, y_va = train_test_split(
+            X, y, test_size=0.2, stratify=y, random_state=0
+        )
+        estimator.model.fit(X_tr, y_tr)
+
+        # ---------- predictions & metrics ----------------------------------------------
+        y_hat      = estimator.model.predict(X_va)
+        y_proba_va = estimator.model.predict_proba(X_va)
+
+        acc  = accuracy_score(y_va, y_hat)
+        ll   = log_loss(y_va, y_proba_va, labels=np.arange(n_actions))
+        bs   = np.mean([
+            brier_score_loss((y_va == k).astype(int), y_proba_va[:, k])
+            for k in range(n_actions)
+        ])
+
+        # ---------- calibration plot ----------------------------------------------------
+        prob_true, prob_pred = calibration_curve(
+            (y_va == y_hat),      # 1 if predicted correct
+            np.max(y_proba_va,1), # confidence of the chosen class
+            n_bins=10
+        )
+        plt.figure(figsize=(4,4))
+        plt.plot(prob_pred, prob_true, "s-", label="RF")
+        plt.plot([0,1],[0,1],"k--")
+        plt.title(f"Reliability ({title})")
+        plt.xlabel("Predicted P(correct)")
+        plt.ylabel("Empirical P(correct)")
+        plt.tight_layout()
+        plt.savefig(f"behaviour_model_reliability_{title}.png", dpi=300)
+        plt.close()
+
+        # ---------- ESS estimate on the SAME split -------------------------------------
+        weights = []
+        for s,a in zip(X_va, y_va):
+            p_b  = estimator.get_action_probabilities(s[None, :], np.array([a]))[0]
+            p_pi = 1.0 / n_actions                        # cheap uniform proxy
+            weights.append(p_pi / max(p_b, 1e-9))
+        w = np.array(weights)
+        ess = (w.sum() ** 2) / (w ** 2).sum()
+
+        print(f"[{title}]  acc={acc:.3f}  log-loss={ll:.3f}  brier={bs:.3f}  ESS≈{ess:.0f}/{len(w)}")
+        return {"accuracy": acc, "log_loss": ll, "brier": bs, "ess": ess}
+
 class CQLEvaluator:
     """Comprehensive evaluation framework for CQL-based HFNC parameter optimization"""
     
@@ -132,7 +185,6 @@ class CQLEvaluator:
             # For now, a warning is fine as main.py is supposed to fit it.
             print("⚠️ CQLEvaluator initialized with an unfitted BehaviorPolicyEstimator. OPE methods requiring it may fail or yield defaults.")
 
-        
         # Determine n_actions
         self.n_actions = n_actions
         if self.n_actions is None:
