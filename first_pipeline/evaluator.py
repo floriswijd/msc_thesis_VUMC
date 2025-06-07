@@ -10,6 +10,11 @@ from sklearn.calibration import calibration_curve
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.model_selection import train_test_split
 from pathlib import Path
+from d3rlpy.ope import DiscreteFQE, FQEConfig
+from d3rlpy.metrics import InitialStateValueEstimationEvaluator
+from d3rlpy.dataset import ReplayBuffer  # nodig vanaf v2.x
+from d3rlpy.dataset import create_infinite_replay_buffer
+
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -241,8 +246,8 @@ class CQLEvaluator:
         # Enhanced OPE methods
         print("\n🎯 Running enhanced off-policy evaluation methods...")
         wis_results = self.evaluate_wis(test_episodes, gamma=ope_gamma, clip_ratio=ope_clip_ratio)
-        dr_results = self.evaluate_dr(test_episodes, gamma=ope_gamma, clip_ratio=ope_clip_ratio)
-        fqe_results = self.evaluate_fqe(test_episodes, fqe_epochs=10)
+        # dr_results = self.evaluate_dr(test_episodes, gamma=ope_gamma, clip_ratio=ope_clip_ratio)
+        # fqe_results = self.evaluate_fqe(test_episodes)
 
         # Combine results
         self.results = {
@@ -250,9 +255,9 @@ class CQLEvaluator:
             'clinical_performance': clinical_metrics,
             'statistical_analysis': statistical_metrics,
             'policy_analysis': policy_metrics,
-            'weighted_importance_sampling': wis_results,
-            'doubly_robust': dr_results,
-            'fitted_q_evaluation': fqe_results,
+            'weighted_importance_sampling': wis_results
+            # 'doubly_robust': dr_results,
+            # 'fitted_q_evaluation': fqe_results,
         }
         
         # Generate plots and reports
@@ -980,19 +985,95 @@ class CQLEvaluator:
             'importance_sampling_component': wis_results['wis_estimate']
         }
     
-    def evaluate_fqe(self, episodes, fqe_epochs=10):
-        """Fitted Q Evaluation."""
-        print("🔄 Running Fitted Q Evaluation (FQE)...")
+    def episodes_to_replaybuffer(self, episodes):
+        """Converteert list[d3rlpy.dataset.Episode] → ReplayBuffer."""
+        # Eén grote buffer aanleggen
+        buf = ReplayBuffer(buffer_size=sum(ep.size() for ep in episodes),
+                        observation_shape=episodes[0].observations.shape[1:],
+                        action_size=episodes[0].actions.max() + 1,  # discrete
+                        discrete_action=True)
+        for ep in episodes:
+            for t in range(ep.size()):
+                buf.append(
+                    ep.observations[t],
+                    ep.actions[t],
+                    ep.rewards[t],
+                    ep.observations[t + 1],
+                    ep.terminals[t],
+                )
+        return buf
+    
+
+
+
+    def evaluate_fqe(
+        self,
+        episodes,             # list[Episode] (bv. train+val)
+        n_steps     = 150_000,
+        n_boot      = 200,
+        discount    = 0.99,
+    ):
+        """Return dict met punt-schatting en 95 %-BI van V^{π_CQL} via FQE."""
+        print(f"🔄  FQE: {len(episodes)} episodes  |  {n_steps:,} gradient stappen")
+
+        # 1) Episodes ➜ ReplayBuffer (nieuwe API)
+        # This buffer is used for the main training of the FQE model
+        buffer = create_infinite_replay_buffer(episodes)
+
+        # 2) Config & object
+        fqe_cfg = FQEConfig(
+            learning_rate = 3e-4,
+            gamma = discount
+        )
+        fqe = DiscreteFQE(
+            algo   = self.model,   # bevroren π_CQL
+            config = fqe_cfg,
+            device = "cpu",
+        )
+
+        # 3) Train the FQE model ONCE on the full dataset
+        init_eval = InitialStateValueEstimationEvaluator()
+        fqe.fit(
+            buffer,
+            n_steps = n_steps,
+            evaluators= {"init_value": init_eval},
+            show_progress=True,
+        )
         
-        # Simplified FQE - in practice you'd train a separate Q-function
-        all_returns = [np.sum(episode.rewards) for episode in episodes]
-        
+        # The point estimate is the final evaluation on the original buffer
+        point_est = float(init_eval(fqe, buffer))
+        print(f"   ➜ punt-schatting V̂ = {point_est:.3f}")
+
+        # 4) Bootstrap CI using the *already trained* FQE model
+        print(f"🔁  Bootstrappen ({n_boot} replicaties)…")
+        boot_vals = []
+        rng = np.random.default_rng(0)
+        for i in range(n_boot):
+            # Create a bootstrap sample of the episodes
+            boot_eps = list(rng.choice(episodes, size=len(episodes), replace=True))
+            
+            # Create a replay buffer from the bootstrap sample
+            boot_buf = create_infinite_replay_buffer(boot_eps)
+
+            # ---- FIX: The key change is here ----
+            # DO NOT call fqe.build_with_dataset(boot_buf).
+            # We want to evaluate the single trained FQE model on the new data sample.
+            # The evaluator object 'init_eval' will use the trained 'fqe' model
+            # and evaluate its performance on the 'boot_buf' data.
+            v_hat = float(init_eval(fqe, boot_buf)) 
+            boot_vals.append(v_hat)
+
+        ci_low, ci_high = np.percentile(boot_vals, [2.5, 97.5])
+        print(f"✅  FQE klaar:  {point_est:.2f}  [95 % CI {ci_low:.2f} – {ci_high:.2f}]")
+
         return {
-            'fqe_estimate': float(np.mean(all_returns)) if all_returns else 0.0,
-            'fqe_std': float(np.std(all_returns)) if all_returns else 0.0,
-            'fqe_epochs_used': fqe_epochs,
-            'convergence_achieved': True
+            "fqe_estimate": point_est,
+            "ci_95": [float(ci_low), float(ci_high)],
+            "fqe_std": float(np.std(boot_vals)),
+            "n_steps": int(n_steps),
+            "n_boot":  int(n_boot),
         }
+
     
     def _generate_enhanced_summary_report(self, save_dir):
         """Generate enhanced summary report with all metrics"""
@@ -1110,3 +1191,247 @@ class CQLEvaluator:
             print("⚠️ Effective sample size is less than 1, indicating poor quality of importance sampling.")
             
         return float(ess)
+    
+    def _calculate_conservative_loss(self, model, episodes):
+        """
+        Berekent conservative loss component voor CQL
+        """
+        import torch
+        import numpy as np
+        
+        # Prepareer data
+        all_observations = []
+        all_actions = []
+        
+        for episode in episodes:
+            observations = episode.observations[:-1]  # Exclude last observation
+            actions = episode.actions
+            
+            all_observations.extend(observations)
+            all_actions.extend(actions)
+        
+        observations = np.array(all_observations, dtype=np.float32)
+        actions = np.array(all_actions, dtype=np.int64)
+        
+        # Get device from model
+        device = next(model.q_func.parameters()).device
+        
+        # Converteer naar tensors
+        obs_tensor = torch.FloatTensor(observations).to(device)
+        actions_tensor = torch.LongTensor(actions).to(device)
+        
+        model.q_func.eval()
+        total_conservative_loss = 0.0
+        batch_size = 256
+        
+        with torch.no_grad():
+            for i in range(0, len(observations), batch_size):
+                end_idx = min(i + batch_size, len(observations))
+                
+                batch_obs = obs_tensor[i:end_idx]
+                batch_actions = actions_tensor[i:end_idx]
+                
+                # Conservative Loss: α * (log-sum-exp Q(s,a) - Q(s, a_behavior))
+                q_values = model.q_func(batch_obs)
+                log_sum_exp_q = torch.logsumexp(q_values, dim=1)
+                behavior_q = q_values.gather(1, batch_actions.unsqueeze(1)).squeeze(1)
+                
+                conservative_loss = model.alpha * (log_sum_exp_q - behavior_q).mean()
+                total_conservative_loss += conservative_loss.item() * len(batch_obs)
+        
+        return total_conservative_loss / len(observations)
+    
+    def evaluate_validation_losses(self, val_episodes):
+        """
+        Gebruik d3rlpy's interne TDErrorEvaluator om validation losses te berekenen
+        """
+        from d3rlpy.metrics import TDErrorEvaluator
+        from d3rlpy.dataset import MDPDataset
+        import numpy as np
+        
+        # Converteer episodes naar correcte arrays voor MDPDataset
+        all_observations = []
+        all_actions = []
+        all_rewards = []
+        all_terminals = []
+        
+        episodes_processed = 0
+        episodes_skipped = 0
+        
+        for episode in val_episodes:
+            # Skip lege episodes
+            if len(episode.actions) == 0:
+                episodes_skipped += 1
+                continue
+            
+            # Voor elke episode: observations[0...n], actions[0...n-1], rewards[0...n-1]
+            # We nemen observations[:-1] voor current states en voegen terminal flag toe
+            
+            episode_observations = episode.observations[:-1]  # Exclude terminal observation
+            episode_actions = episode.actions
+            episode_rewards = episode.rewards
+            
+            # Check data consistency
+            if len(episode_observations) != len(episode_actions) or len(episode_actions) != len(episode_rewards):
+                episodes_skipped += 1
+                continue
+            
+            # Maak terminals array
+            episode_terminals = np.zeros(len(episode_actions), dtype=bool)
+            episode_terminals[-1] = True  # Laatste actie in episode is terminal
+            
+            # Voeg toe aan collecties
+            all_observations.extend(episode_observations)
+            all_actions.extend(episode_actions)
+            all_rewards.extend(episode_rewards)
+            all_terminals.extend(episode_terminals)
+            
+            episodes_processed += 1
+    
+        if episodes_processed == 0:
+            print("❌ No valid episodes for validation loss calculation")
+            return {
+                'td_loss': 0.0,
+                'conservative_loss': 0.0,
+                'total_loss': 0.0,
+                'n_samples': 0,
+                'n_episodes': 0
+            }
+        
+        print(f"🔍 Processed {episodes_processed} episodes, skipped {episodes_skipped}")
+        
+        # Converteer naar numpy arrays
+        observations = np.array(all_observations, dtype=np.float32)
+        actions = np.array(all_actions, dtype=np.int64)
+        rewards = np.array(all_rewards, dtype=np.float32)
+        terminals = np.array(all_terminals, dtype=bool)
+        
+        print(f"🔍 Dataset shapes: obs={observations.shape}, actions={actions.shape}, rewards={rewards.shape}, terminals={terminals.shape}")
+        
+        # Maak MDPDataset object met correcte parameters
+        val_dataset = MDPDataset(
+            observations=observations,
+            actions=actions,
+            rewards=rewards,
+            terminals=terminals
+        )
+        
+        print(f"🔍 Validation dataset created successfully:")
+        print(f"   Total transitions: {len(observations)}")
+        print(f"   Action space size: {val_dataset.action_size}")
+        
+        # Gebruik d3rlpy's TD error evaluator
+        td_evaluator = TDErrorEvaluator()
+        
+        try:
+            # Evalueer het model met dataset
+            td_loss = td_evaluator(self.model, val_dataset)
+            print(f"✅ TD Loss calculated successfully: {td_loss:.6f}")
+        except Exception as e:
+            print(f"❌ Error in TD evaluation: {e}")
+            # Fallback naar handmatige berekening
+            td_loss = self._calculate_td_loss_manual(val_episodes)
+            print(f"🔄 Fallback TD Loss: {td_loss:.6f}")
+        
+        # Voor conservative loss gebruiken we de originele episodes
+        conservative_loss = self._calculate_conservative_loss(self.model, val_episodes)
+        
+        # Total loss is som van beide
+        total_loss = td_loss + conservative_loss
+        
+        results = {
+            'td_loss': td_loss,
+            'conservative_loss': conservative_loss,
+            'total_loss': total_loss,
+            'n_samples': len(observations),
+            'n_episodes': episodes_processed
+        }
+        
+        print(f"📊 Validation Loss Results:")
+        print(f"   TD Loss:          {td_loss:.6f}")
+        print(f"   Conservative Loss: {conservative_loss:.6f}")
+        print(f"   Total Loss:       {total_loss:.6f}")
+        print(f"   Samples:          {results['n_samples']:,}")
+        print(f"   Episodes:         {episodes_processed:,}")
+        
+        return results
+
+    def _calculate_td_loss_manual(self, episodes):
+        """
+        Handmatige TD loss berekening als fallback
+        """
+        import torch
+        import numpy as np
+        
+        all_observations = []
+        all_actions = []
+        all_rewards = []
+        all_next_observations = []
+        all_terminals = []
+        
+        for episode in episodes:
+            if len(episode.actions) == 0:
+                continue
+                
+            # Current states (exclude last observation)
+            observations = episode.observations[:-1]
+            actions = episode.actions
+            rewards = episode.rewards
+            
+            # Next states (exclude first observation)
+            next_observations = episode.observations[1:]
+            
+            # Terminals (only last action is terminal)
+            terminals = np.zeros(len(actions), dtype=bool)
+            terminals[-1] = True
+            
+            all_observations.extend(observations)
+            all_actions.extend(actions)
+            all_rewards.extend(rewards)
+            all_next_observations.extend(next_observations)
+            all_terminals.extend(terminals)
+        
+        if not all_observations:
+            return 0.0
+            
+        # Convert to tensors
+        device = next(self.model.q_func.parameters()).device
+        
+        obs_tensor = torch.FloatTensor(np.array(all_observations)).to(device)
+        actions_tensor = torch.LongTensor(np.array(all_actions)).to(device)
+        rewards_tensor = torch.FloatTensor(np.array(all_rewards)).to(device)
+        next_obs_tensor = torch.FloatTensor(np.array(all_next_observations)).to(device)
+        terminals_tensor = torch.BoolTensor(np.array(all_terminals)).to(device)
+        
+        self.model.q_func.eval()
+        total_td_loss = 0.0
+        batch_size = 256
+        
+        with torch.no_grad():
+            for i in range(0, len(all_observations), batch_size):
+                end_idx = min(i + batch_size, len(all_observations))
+                
+                batch_obs = obs_tensor[i:end_idx]
+                batch_actions = actions_tensor[i:end_idx]
+                batch_rewards = rewards_tensor[i:end_idx]
+                batch_next_obs = next_obs_tensor[i:end_idx]
+                batch_terminals = terminals_tensor[i:end_idx]
+                
+                # Current Q-values
+                current_q_values = self.model.q_func(batch_obs)
+                current_q = current_q_values.gather(1, batch_actions.unsqueeze(1)).squeeze(1)
+                
+                # Target Q-values
+                if hasattr(self.model, 'target_q_func') and self.model.target_q_func is not None:
+                    target_q_values = self.model.target_q_func(batch_next_obs)
+                else:
+                    target_q_values = self.model.q_func(batch_next_obs)
+                
+                max_target_q = target_q_values.max(1)[0]
+                td_target = batch_rewards + self.model.gamma * max_target_q * (~batch_terminals)
+                
+                td_loss = torch.nn.functional.mse_loss(current_q, td_target)
+                total_td_loss += td_loss.item() * len(batch_obs)
+    
+        return total_td_loss / len(all_observations)
+

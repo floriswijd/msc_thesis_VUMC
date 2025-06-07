@@ -57,6 +57,10 @@ def main():
     # cfg = config.load_config(args.cfg)
     
     data_dict = data_loader.preprocess_data(df)
+
+    for i, col in enumerate(data_dict['state_columns'], 1):
+        print(f"   {i:2d}. {col}")
+
     print("\n=== Creating dataset ===")
     try:
         mdp_dataset_full = dataset.create_mdp_dataset(
@@ -193,6 +197,27 @@ def main():
     
     cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
     comprehensive_results = cql_evaluator_obj.evaluate_comprehensive(test_eps, save_dir=evaluation_results_save_dir)
+    fqe_metrics = cql_evaluator_obj.evaluate_fqe(episodes=train_eps + val_eps,
+                                     n_steps = 150_000,
+                                     n_boot  = 200)
+    print("\n=== FQE summary ===")
+    print(fqe_metrics)
+    val_losses = cql_evaluator_obj.evaluate_validation_losses(val_eps)
+
+        
+    # Vergelijk met training losses uit CSV
+    if latest_log_dir_for_outputs:
+        loss_csv = latest_log_dir_for_outputs / "loss.csv"
+        if loss_csv.exists():
+            import pandas as pd
+            train_losses = pd.read_csv(loss_csv)
+            if not train_losses.empty:
+                last_train_loss = train_losses.iloc[-1]
+                
+                print(f"\n📈 Training vs Validation Comparison:")
+                print(f"   TD Loss:          Train {last_train_loss.get('td_loss', 0):.6f} | Val {val_losses['td_loss']:.6f}")
+                print(f"   Conservative Loss: Train {last_train_loss.get('conservative_loss', 0):.6f} | Val {val_losses['conservative_loss']:.6f}")
+                print(f"   Total Loss:       Train {last_train_loss.get('loss', 0):.6f} | Val {val_losses['total_loss']:.6f}")
     
     # Also keep basic metrics for backward compatibility
     basic_metrics = cql_evaluator_obj._evaluate_basic_performance(test_eps)

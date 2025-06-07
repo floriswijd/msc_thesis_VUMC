@@ -38,6 +38,10 @@ def preprocess_data(df):
         "humidification_HME",
         "humidification_nan",
         "episode_len",
+        "r_oxygenation",
+        "r_clinical_stability",
+        "r_resource_utilization",
+
         
         # 🚨 CRITICAL: Exclude future information (temporal leakage)
         "spo2_next",         # Next timestep's SpO2 - this is in the future!        

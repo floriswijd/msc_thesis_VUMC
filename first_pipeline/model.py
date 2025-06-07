@@ -18,6 +18,8 @@ def create_cql_config(batch_size, learning_rate, gamma, alpha, scaler=None):
     )
     if scaler is not None:
         config.observation_scaler = scaler
+    else:
+        print("No scaler provided, using default configuration.")
     print(
         f"Created CQL config with alpha={config.alpha}, batch_size={config.batch_size}"
     )
