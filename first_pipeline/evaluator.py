@@ -1192,210 +1192,183 @@ class CQLEvaluator:
             
         return float(ess)
     
+    def evaluate_validation_losses(self, val_episodes, set_name="validation"):
+        """
+        Calculates TD and Conservative losses on a given set of episodes
+        by strictly following the d3rlpy documentation for flat arrays.
+        """
+        from d3rlpy.metrics import TDErrorEvaluator
+        from d3rlpy.dataset import MDPDataset
+        import numpy as np
+
+        print(f"\n🔬 Evaluating losses for '{set_name}' set (Strict Documentation Mode)...")
+
+        if not val_episodes:
+            print(f"   ❌ No episodes provided for '{set_name}' set.")
+            return {'td_loss': 0.0, 'conservative_loss': 0.0, 'total_loss': 0.0}
+
+        # Step 1: Flatten all episodes into single, continuous arrays.
+        all_observations = []
+        all_actions = []
+        all_rewards = []
+        all_terminals = []
+        
+        for episode in val_episodes:
+            if episode.size() == 0:
+                continue
+            all_observations.extend(episode.observations)
+            all_actions.extend(episode.actions)
+            all_rewards.extend(episode.rewards)
+            
+            # Create a 'terminals' array where only the last step is True
+            terminals = np.zeros(episode.size(), dtype=bool)
+            terminals[-1] = True
+            all_terminals.extend(terminals)
+
+        # Sanity check to ensure all arrays have the same length, as per documentation
+        if not (len(all_observations) == len(all_actions) == len(all_rewards) == len(all_terminals)):
+            print("   ❌ FATAL: After flattening episodes, arrays have mismatched lengths. Cannot proceed.")
+            print(f"      Obs: {len(all_observations)}, Act: {len(all_actions)}, Rew: {len(all_rewards)}, Term: {len(all_terminals)}")
+            return {'td_loss': 0.0, 'conservative_loss': 0.0, 'total_loss': 0.0}
+
+        print(f"   🔍 Prepared {len(all_observations)} transitions from {len(val_episodes)} episodes.")
+
+        # Step 2: Create the MDPDataset exactly as shown in the documentation.
+        val_dataset = MDPDataset(
+            observations=np.array(all_observations),
+            actions=np.array(all_actions),
+            rewards=np.array(all_rewards),
+            terminals=np.array(all_terminals)
+        )
+
+        # Step 3: Use d3rlpy's TDErrorEvaluator. It should now work.
+        td_loss = 0.0
+        try:
+            td_evaluator = TDErrorEvaluator()
+            td_loss = td_evaluator(self.model, val_dataset)
+        except Exception as e:
+            print(f"   ⚠️ Could not use TDErrorEvaluator: {e}. Defaulting TD Loss to 0.")
+            td_loss = 0.0
+
+        # Step 4: Use the corrected helper to calculate the Conservative Loss.
+        conservative_loss = self._calculate_conservative_loss(self.model, val_episodes)
+
+        # Step 5: Combine and return the results.
+        results = {
+            'td_loss': td_loss,
+            'conservative_loss': conservative_loss,
+            'total_loss': td_loss + conservative_loss
+        }
+
+        print(f"   ✅ '{set_name.capitalize()}' Loss Results:")
+        print(f"      TD Loss:          {results['td_loss']:.6f}")
+        print(f"      Conservative Loss: {results['conservative_loss']:.6f}")
+        print(f"      Total Loss:       {results['total_loss']:.6f}")
+        
+        return results
+
     def _calculate_conservative_loss(self, model, episodes):
         """
-        Berekent conservative loss component voor CQL
+        Calculates the conservative loss component for CQL.
+        This version uses the correct Q-function interface.
         """
         import torch
         import numpy as np
-        
         # Prepareer data
         all_observations = []
         all_actions = []
         
         for episode in episodes:
-            observations = episode.observations[:-1]  # Exclude last observation
-            actions = episode.actions
-            
-            all_observations.extend(observations)
-            all_actions.extend(actions)
+            all_observations.extend(episode.observations)
+            all_actions.extend(episode.actions)
+
+        if not all_observations:
+            return 0.0
         
         observations = np.array(all_observations, dtype=np.float32)
         actions = np.array(all_actions, dtype=np.int64)
         
-        # Get device from model
-        device = next(model.q_func.parameters()).device
+        # FIX: Get device directly from the model object
+        device = model._device
         
-        # Converteer naar tensors
         obs_tensor = torch.FloatTensor(observations).to(device)
         actions_tensor = torch.LongTensor(actions).to(device)
         
-        model.q_func.eval()
+        # FIX: Use the correct Q-function interface
+        q_function = model._impl.q_function[0]  # Get the first Q-function from ModuleList
+        q_function.eval()
+
+        if hasattr(model._config, 'alpha'):
+            print(f"   [DEBUG] Using alpha value from model config: {model._config.alpha}")
+        
+        # FIX: Get alpha from the model's config
+        alpha = model._config.alpha if hasattr(model._config, 'alpha') else 0.8
+
         total_conservative_loss = 0.0
         batch_size = 256
         
         with torch.no_grad():
+            # Add a flag to only print for the first batch
+            printed_batch_info = False
+
             for i in range(0, len(observations), batch_size):
                 end_idx = min(i + batch_size, len(observations))
                 
                 batch_obs = obs_tensor[i:end_idx]
                 batch_actions = actions_tensor[i:end_idx]
                 
-                # Conservative Loss: α * (log-sum-exp Q(s,a) - Q(s, a_behavior))
-                q_values = model.q_func(batch_obs)
-                log_sum_exp_q = torch.logsumexp(q_values, dim=1)
-                behavior_q = q_values.gather(1, batch_actions.unsqueeze(1)).squeeze(1)
+                # ... (the rest of the q_value calculation is the same) ...
+                q_function_output = q_function(batch_obs)
+                q_values = q_function_output.q_value
                 
-                conservative_loss = model.alpha * (log_sum_exp_q - behavior_q).mean()
-                total_conservative_loss += conservative_loss.item() * len(batch_obs)
+                log_sum_exp_q = torch.logsumexp(q_values, dim=1)
+                
+                if batch_actions.dim() == 1:
+                    batch_actions = batch_actions.unsqueeze(1)
+                
+                behavior_q = q_values.gather(1, batch_actions).squeeze(1)
+
+                # ---- START: ADD THIS DEBUG PRINT ----
+                if not printed_batch_info:
+                    print("\n   [DEBUG] Analyzing the first batch in loss calculation:")
+                    print(f"      Alpha value (α): {alpha:.2f}")
+                    print(f"      Avg. logsumexp(Q) (model's belief about OOD actions): {log_sum_exp_q.mean().item():.4f}")
+                    print(f"      Avg. Q(s,a) (model's belief about data actions): {behavior_q.mean().item():.4f}")
+                    printed_batch_info = True
+                # ---- END: ADD THIS DEBUG PRINT ----
+
+                cql_term = log_sum_exp_q - behavior_q
+                batch_sum_conservative_loss = alpha * cql_term.mean() #was eerst sum()
+                total_conservative_loss += batch_sum_conservative_loss.item()
         
         return total_conservative_loss / len(observations)
-    
-    def evaluate_validation_losses(self, val_episodes):
-        """
-        Gebruik d3rlpy's interne TDErrorEvaluator om validation losses te berekenen
-        """
-        from d3rlpy.metrics import TDErrorEvaluator
-        from d3rlpy.dataset import MDPDataset
-        import numpy as np
-        
-        # Converteer episodes naar correcte arrays voor MDPDataset
-        all_observations = []
-        all_actions = []
-        all_rewards = []
-        all_terminals = []
-        
-        episodes_processed = 0
-        episodes_skipped = 0
-        
-        for episode in val_episodes:
-            # Skip lege episodes
-            if len(episode.actions) == 0:
-                episodes_skipped += 1
-                continue
-            
-            # Voor elke episode: observations[0...n], actions[0...n-1], rewards[0...n-1]
-            # We nemen observations[:-1] voor current states en voegen terminal flag toe
-            
-            episode_observations = episode.observations[:-1]  # Exclude terminal observation
-            episode_actions = episode.actions
-            episode_rewards = episode.rewards
-            
-            # Check data consistency
-            if len(episode_observations) != len(episode_actions) or len(episode_actions) != len(episode_rewards):
-                episodes_skipped += 1
-                continue
-            
-            # Maak terminals array
-            episode_terminals = np.zeros(len(episode_actions), dtype=bool)
-            episode_terminals[-1] = True  # Laatste actie in episode is terminal
-            
-            # Voeg toe aan collecties
-            all_observations.extend(episode_observations)
-            all_actions.extend(episode_actions)
-            all_rewards.extend(episode_rewards)
-            all_terminals.extend(episode_terminals)
-            
-            episodes_processed += 1
-    
-        if episodes_processed == 0:
-            print("❌ No valid episodes for validation loss calculation")
-            return {
-                'td_loss': 0.0,
-                'conservative_loss': 0.0,
-                'total_loss': 0.0,
-                'n_samples': 0,
-                'n_episodes': 0
-            }
-        
-        print(f"🔍 Processed {episodes_processed} episodes, skipped {episodes_skipped}")
-        
-        # Converteer naar numpy arrays
-        observations = np.array(all_observations, dtype=np.float32)
-        actions = np.array(all_actions, dtype=np.int64)
-        rewards = np.array(all_rewards, dtype=np.float32)
-        terminals = np.array(all_terminals, dtype=bool)
-        
-        print(f"🔍 Dataset shapes: obs={observations.shape}, actions={actions.shape}, rewards={rewards.shape}, terminals={terminals.shape}")
-        
-        # Maak MDPDataset object met correcte parameters
-        val_dataset = MDPDataset(
-            observations=observations,
-            actions=actions,
-            rewards=rewards,
-            terminals=terminals
-        )
-        
-        print(f"🔍 Validation dataset created successfully:")
-        print(f"   Total transitions: {len(observations)}")
-        print(f"   Action space size: {val_dataset.action_size}")
-        
-        # Gebruik d3rlpy's TD error evaluator
-        td_evaluator = TDErrorEvaluator()
-        
-        try:
-            # Evalueer het model met dataset
-            td_loss = td_evaluator(self.model, val_dataset)
-            print(f"✅ TD Loss calculated successfully: {td_loss:.6f}")
-        except Exception as e:
-            print(f"❌ Error in TD evaluation: {e}")
-            # Fallback naar handmatige berekening
-            td_loss = self._calculate_td_loss_manual(val_episodes)
-            print(f"🔄 Fallback TD Loss: {td_loss:.6f}")
-        
-        # Voor conservative loss gebruiken we de originele episodes
-        conservative_loss = self._calculate_conservative_loss(self.model, val_episodes)
-        
-        # Total loss is som van beide
-        total_loss = td_loss + conservative_loss
-        
-        results = {
-            'td_loss': td_loss,
-            'conservative_loss': conservative_loss,
-            'total_loss': total_loss,
-            'n_samples': len(observations),
-            'n_episodes': episodes_processed
-        }
-        
-        print(f"📊 Validation Loss Results:")
-        print(f"   TD Loss:          {td_loss:.6f}")
-        print(f"   Conservative Loss: {conservative_loss:.6f}")
-        print(f"   Total Loss:       {total_loss:.6f}")
-        print(f"   Samples:          {results['n_samples']:,}")
-        print(f"   Episodes:         {episodes_processed:,}")
-        
-        return results
 
     def _calculate_td_loss_manual(self, episodes):
         """
-        Handmatige TD loss berekening als fallback
+        Handmatige TD loss berekening als fallback.
+        This version uses the correct `_impl.q_function` and `_impl.target_q_function`.
         """
         import torch
         import numpy as np
         
-        all_observations = []
-        all_actions = []
-        all_rewards = []
-        all_next_observations = []
-        all_terminals = []
+        all_observations, all_actions, all_rewards, all_next_observations, all_terminals = [], [], [], [], []
         
         for episode in episodes:
-            if len(episode.actions) == 0:
+            if episode.size() == 0:
                 continue
-                
-            # Current states (exclude last observation)
-            observations = episode.observations[:-1]
-            actions = episode.actions
-            rewards = episode.rewards
-            
-            # Next states (exclude first observation)
-            next_observations = episode.observations[1:]
-            
-            # Terminals (only last action is terminal)
-            terminals = np.zeros(len(actions), dtype=bool)
+            all_observations.extend(episode.observations[:-1])
+            all_actions.extend(episode.actions)
+            all_rewards.extend(episode.rewards)
+            all_next_observations.extend(episode.observations[1:])
+            terminals = np.zeros(len(episode.actions), dtype=bool)
             terminals[-1] = True
-            
-            all_observations.extend(observations)
-            all_actions.extend(actions)
-            all_rewards.extend(rewards)
-            all_next_observations.extend(next_observations)
             all_terminals.extend(terminals)
         
         if not all_observations:
             return 0.0
             
-        # Convert to tensors
-        device = next(self.model.q_func.parameters()).device
+        # FIX: Get device directly from the model object
+        device = self.model._device
         
         obs_tensor = torch.FloatTensor(np.array(all_observations)).to(device)
         actions_tensor = torch.LongTensor(np.array(all_actions)).to(device)
@@ -1403,7 +1376,13 @@ class CQLEvaluator:
         next_obs_tensor = torch.FloatTensor(np.array(all_next_observations)).to(device)
         terminals_tensor = torch.BoolTensor(np.array(all_terminals)).to(device)
         
-        self.model.q_func.eval()
+        # FIX: Access the Q-networks via the internal _impl attribute
+        q_function = self.model._impl.q_function
+        target_q_function = self.model._impl.target_q_function
+        q_function.eval()
+        if target_q_function:
+            target_q_function.eval()
+        
         total_td_loss = 0.0
         batch_size = 256
         
@@ -1417,21 +1396,19 @@ class CQLEvaluator:
                 batch_next_obs = next_obs_tensor[i:end_idx]
                 batch_terminals = terminals_tensor[i:end_idx]
                 
-                # Current Q-values
-                current_q_values = self.model.q_func(batch_obs)
+                current_q_values = q_function(batch_obs)
                 current_q = current_q_values.gather(1, batch_actions.unsqueeze(1)).squeeze(1)
                 
-                # Target Q-values
-                if hasattr(self.model, 'target_q_func') and self.model.target_q_func is not None:
-                    target_q_values = self.model.target_q_func(batch_next_obs)
+                if target_q_function:
+                    target_q_values = target_q_function(batch_next_obs)
                 else:
-                    target_q_values = self.model.q_func(batch_next_obs)
+                    target_q_values = q_function(batch_next_obs)
                 
                 max_target_q = target_q_values.max(1)[0]
                 td_target = batch_rewards + self.model.gamma * max_target_q * (~batch_terminals)
                 
-                td_loss = torch.nn.functional.mse_loss(current_q, td_target)
-                total_td_loss += td_loss.item() * len(batch_obs)
-    
+                td_loss = torch.nn.functional.mse_loss(current_q, td_target, reduction='sum')
+                total_td_loss += td_loss.item()
+        
         return total_td_loss / len(all_observations)
 

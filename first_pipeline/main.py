@@ -77,6 +77,7 @@ def main():
         
         train_eps, val_eps, test_eps = dataset.split_dataset(mdp_dataset_full)
 
+
         if not train_eps:
             print("\n❌ Error: No training episodes after split. Exiting.")
             sys.exit(1)
@@ -196,16 +197,8 @@ def main():
     from evaluator import CQLEvaluator
     
     cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
-    comprehensive_results = cql_evaluator_obj.evaluate_comprehensive(test_eps, save_dir=evaluation_results_save_dir)
-    fqe_metrics = cql_evaluator_obj.evaluate_fqe(episodes=train_eps + val_eps,
-                                     n_steps = 150_000,
-                                     n_boot  = 200)
-    print("\n=== FQE summary ===")
-    print(fqe_metrics)
-    val_losses = cql_evaluator_obj.evaluate_validation_losses(val_eps)
-
-        
-    # Vergelijk met training losses uit CSV
+    val_losses = cql_evaluator_obj.evaluate_validation_losses(test_eps)
+        # Vergelijk met training losses uit CSV
     if latest_log_dir_for_outputs:
         loss_csv = latest_log_dir_for_outputs / "loss.csv"
         if loss_csv.exists():
@@ -218,6 +211,15 @@ def main():
                 print(f"   TD Loss:          Train {last_train_loss.get('td_loss', 0):.6f} | Val {val_losses['td_loss']:.6f}")
                 print(f"   Conservative Loss: Train {last_train_loss.get('conservative_loss', 0):.6f} | Val {val_losses['conservative_loss']:.6f}")
                 print(f"   Total Loss:       Train {last_train_loss.get('loss', 0):.6f} | Val {val_losses['total_loss']:.6f}")
+
+    comprehensive_results = cql_evaluator_obj.evaluate_comprehensive(test_eps, save_dir=evaluation_results_save_dir)
+    fqe_metrics = cql_evaluator_obj.evaluate_fqe(episodes=train_eps + val_eps,
+                                     n_steps = 150_000,
+                                     n_boot  = 200)
+    print("\n=== FQE summary ===")
+    print(fqe_metrics)
+
+
     
     # Also keep basic metrics for backward compatibility
     basic_metrics = cql_evaluator_obj._evaluate_basic_performance(test_eps)
