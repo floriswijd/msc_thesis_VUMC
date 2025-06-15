@@ -66,16 +66,41 @@ def main():
     
     data_dict = data_loader.preprocess_data(df)
 
-    for i, col in enumerate(data_dict['state_columns'], 1):
-        print(f"   {i:2d}. {col}")
+
+
+    # for i, col in enumerate(data_dict['state_columns'], 1):
+    #     print(f"   {i:2d}. {col}")
+
+    # print(data_dict['stay_ids'][:5])  # Print first 5 stay_ids for debugging
+    
+    # # Calculate and print number of null values in stay_ids
+    # s_ids = np.asarray(data_dict['stay_ids']) # Ensure it's a numpy array
+    # null_count_in_stay_ids = 0
+    # if np.issubdtype(s_ids.dtype, np.floating): # Handles float arrays (e.g., [1.0, np.nan, 2.0])
+    #     null_count_in_stay_ids = np.sum(np.isnan(s_ids))
+    # elif s_ids.dtype == object: # Handles object arrays (e.g., [1, None, 'text', np.nan])
+    #     # Iterate and check for None or float NaN
+    #     # This list comprehension creates a boolean array, then np.sum counts True values.
+    #     null_count_in_stay_ids = np.sum([item is None or (isinstance(item, float) and np.isnan(item)) for item in s_ids])
+    # # For other dtypes (e.g., int, bool, non-object string arrays),
+    # # null_count_in_stay_ids remains 0 by default, as np.nan or None are not standard null representations for them
+    # # without being explicitly cast to float or object types.
+    
+    # print(f"   Number of null values in stay_ids: {null_count_in_stay_ids}")
+
+
 
     print("\n=== Creating dataset ===")
     try:
-        mdp_dataset_full = dataset.create_mdp_dataset(
+        # Create enhanced dataset with metadata
+        mdp_dataset_full = dataset.create_mdp_dataset_with_metadata(
             data_dict["states"],
             data_dict["actions"], 
             data_dict["rewards"],
-            data_dict["dones"]
+            data_dict["dones"],
+            data_dict["stay_ids"],
+            data_dict["subject_ids"],
+            data_dict["episode_ids"]
         )
         
         utils.debug_nan_values(data_dict["states"], "states")
@@ -83,14 +108,20 @@ def main():
         utils.debug_inf_values(data_dict["states"], "states")
         utils.debug_inf_values(data_dict["rewards"], "rewards")
         
-        train_eps, val_eps, test_eps = dataset.split_dataset(mdp_dataset_full)
-
+        # Use stay-level split to prevent data leakage
+        print("\n=== Splitting dataset by stay (preventing data leakage) ===")
+        train_eps, val_eps, test_eps = dataset.split_dataset_by_stay(
+            mdp_dataset_full,
+            test_size=0.3,
+            val_size=0.5,
+            random_state=42
+        )
 
         if not train_eps:
             print("\n❌ Error: No training episodes after split. Exiting.")
             sys.exit(1)
         
-        # ADD THIS: Count transitions in each split
+        # Count transitions in each split
         train_transitions = dataset.count_transitions(train_eps)
         val_transitions = dataset.count_transitions(val_eps)
         test_transitions = dataset.count_transitions(test_eps)
@@ -111,6 +142,10 @@ def main():
         print(f"   Training:   {avg_train_len:.1f} transitions/episode")
         print(f"   Validation: {avg_val_len:.1f} transitions/episode")
         print(f"   Test:       {avg_test_len:.1f} transitions/episode")
+
+        # Determine n_actions from the data
+        n_actions = int(np.max(data_dict['actions'])) + 1
+        print(f"\n📊 Inferred n_actions from data: {n_actions}")
 
         # ADD THIS: Determine n_actions from the data
         if 'actions' in data_dict and data_dict['actions'] is not None:
@@ -210,6 +245,15 @@ def main():
         save_location_message_suffix = "in their respective default directories ('evaluation_results/', 'clinical_validation/')"
         print(f"⚠️  Outputs will be saved {save_location_message_suffix} as the specific run directory was not identified.")
 
+
+    print("📊 Creating combined training analysis...")
+    from plot_training_result import plot_dual_axis_curves, plot_subplots_version
+    
+    plot_dual_axis_curves(str(latest_log_dir_for_outputs), 
+                         save_path=str(latest_log_dir_for_outputs / "training_analysis_dual.png"))
+    plot_subplots_version(str(latest_log_dir_for_outputs), 
+                         save_path=str(latest_log_dir_for_outputs / "training_analysis_subplots.png"))
+
     print("\\n=== Evaluating model ===")
     # Use the new comprehensive evaluation framework
     from evaluator import CQLEvaluator
@@ -236,6 +280,7 @@ def main():
                                      n_boot  = 200)
     print("\n=== FQE summary ===")
     print(fqe_metrics)
+
 
 
     

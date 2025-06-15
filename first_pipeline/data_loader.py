@@ -49,6 +49,17 @@ def preprocess_data(df):
         "r_A", "r_B", "r_C", "r_D",  # Individual reward components
     ]
     
+    try:
+        stay_ids = df["stay_id"].values
+        subject_ids = df["subject_id"].values  
+        episode_ids = df["hfnc_episode"].values
+        metadata_available = True
+        print(f"📊 Extracted metadata for {len(stay_ids)} timesteps")
+    except KeyError as e:
+        print(f"⚠️ Could not extract metadata: {e}")
+        metadata_available = False
+
+
     state_cols = []
     for col in df.columns:
         if col not in columns_to_exclude:
@@ -93,7 +104,7 @@ def preprocess_data(df):
             columns_to_show = [col for col in df.columns if col not in columns_to_exclude]
             print(df.iloc[nan_reward_indices][columns_to_show].head(100))
         rewards = np.nan_to_num(rewards, nan=0.0)
-    return {
+    result = {
         "states": states,
         "actions": actions,
         "rewards": rewards,
@@ -101,3 +112,10 @@ def preprocess_data(df):
         "state_columns": state_cols,
     }
 
+    if metadata_available:
+        result.update({
+            "stay_ids": stay_ids,
+            "subject_ids": subject_ids,
+            "episode_ids": episode_ids,
+        })
+    return result
