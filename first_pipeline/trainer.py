@@ -3,8 +3,9 @@ import numpy as np
 import math
 from dataset import count_transitions
 from d3rlpy.dataset import FIFOBuffer, ReplayBuffer
+from d3rlpy.metrics import TDErrorEvaluator, DiscreteActionMatchEvaluator 
 
-def train_model(model, train_episodes, n_epochs, batch_size, experiment_name=None, val_episodes=None):
+def train_model(model, train_episodes,val_episodes, n_epochs, batch_size, experiment_name=None):
     print("🚀  Starting training DiscreteCQL...")
     n_transitions = sum(len(ep.observations) for ep in train_episodes)
     print(f"Using dataset with {n_transitions} transitions for training")
@@ -26,7 +27,21 @@ def train_model(model, train_episodes, n_epochs, batch_size, experiment_name=Non
         episodes=train_episodes
     )
     print(f"Training for {n_epochs} epochs, with {steps_per_epoch} steps per epoch, totaling {n_steps} steps...")
-    
+
+    # --- THIS IS THE KEY CHANGE ---
+    # Create the evaluators dictionary to pass to the .fit() method
+    evaluators = {}
+    if val_episodes:
+        print(f"🔬 Validation set provided with {len(val_episodes)} episodes. Setting up TDErrorEvaluator.")
+        # The TDErrorEvaluator computes the Bellman error on the validation set
+        evaluators = {
+        'validation_td_error': TDErrorEvaluator(episodes=val_episodes),
+        'validation_action_match': DiscreteActionMatchEvaluator(episodes=val_episodes)
+    }
+        # td_error_evaluator = TDErrorEvaluator(episodes=val_episodes)
+        # evaluators['validation'] = td_error_evaluator
+    # --------------------------------
+
     result = model.fit(
         replay_buffer,
         n_steps=n_steps,
@@ -34,10 +49,30 @@ def train_model(model, train_episodes, n_epochs, batch_size, experiment_name=Non
         experiment_name=experiment_name,
         show_progress=True,
         save_interval=max(n_steps // 10, 1),
-        evaluators=None if val_episodes is None else val_episodes,
+        evaluators=evaluators,  # <--- PASS THE DICTIONARY HERE
     )
     print("✅  Training completed successfully!")
     return result, None
+
+
+
+
+
+
+    #########OLD
+    # print(f"Training for {n_epochs} epochs, with {steps_per_epoch} steps per epoch, totaling {n_steps} steps...")
+    
+    # result = model.fit(
+    #     replay_buffer,
+    #     n_steps=n_steps,
+    #     n_steps_per_epoch=steps_per_epoch,
+    #     experiment_name=experiment_name,
+    #     show_progress=True,
+    #     save_interval=max(n_steps // 10, 1),
+    #     evaluators=None if val_episodes is None else val_episodes,
+    # )
+    # print("✅  Training completed successfully!")
+    # return result, None
 
 def check_training_logs(log_dir):
     try:

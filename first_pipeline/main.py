@@ -119,25 +119,10 @@ def main():
         else:
             print("\n❌ Cannot determine n_actions from data.")
             sys.exit(1)
-
-        # ADD THIS: Initialize Behavior Policy Estimator BEFORE training
-        print("\n=== Initializing Enhanced Off-Policy Evaluation ===")
-        from evaluator import BehaviorPolicyEstimator
-        
-        behavior_policy_estimator = BehaviorPolicyEstimator(n_actions=n_actions)
-        print("🔧 Fitting behavior policy on training episodes...")
-        behavior_policy_estimator.fit(train_eps)  # Fit on training data
-        print("\n=== Behaviour-policy validation ===")
-        metrics_bp = BehaviorPolicyEstimator.evaluate_behaviour_model(
-            behavior_policy_estimator,
-            train_eps,                 # use a slice of training data
-            n_actions,
-            title="Train-split"
-)
-
     except Exception as e:
         print(f"\n❌ Error creating dataset: {e}")
         sys.exit(1)
+ 
 
     print("\n=== Creating model ===")
     scaler = model.create_scaler()
@@ -148,13 +133,38 @@ def main():
     cql = model.create_cql_model(config=cql_config, device=device)
 
     print("\n=== Training model ===")
-    result, errors = trainer.train_model(model=cql, train_episodes=train_eps, n_epochs=args.epochs, batch_size=args.batch, experiment_name=args.logdir)
+    # result, errors = trainer.train_model(model=cql, train_episodes=train_eps, n_epochs=args.epochs, batch_size=args.batch, experiment_name=args.logdir)
     
+    result, errors = trainer.train_model(
+        model=cql,
+        train_episodes=train_eps,
+        val_episodes=val_eps,  # <--- PASS THE VALIDATION EPISODES
+        n_epochs=args.epochs,
+        batch_size=args.batch,
+        experiment_name=args.logdir
+    )
+
+
     if errors:
         print("\\n⚠️ Training encountered errors, checking logs for diagnosis...")
         # Pass the corrected path to check_training_logs
         actual_d3rlpy_log_dir = Path("d3rlpy_logs") / args.logdir
         trainer.check_training_logs(actual_d3rlpy_log_dir)
+
+        # ADD THIS: Initialize Behavior Policy Estimator BEFORE training
+    print("\n=== Initializing Enhanced Off-Policy Evaluation ===")
+    from evaluator import BehaviorPolicyEstimator
+    
+    behavior_policy_estimator = BehaviorPolicyEstimator(n_actions=n_actions)
+    print("🔧 Fitting behavior policy on training episodes...")
+    behavior_policy_estimator.fit(train_eps)  # Fit on training data
+    print("\n=== Behaviour-policy validation ===")
+    metrics_bp = BehaviorPolicyEstimator.evaluate_behaviour_model(
+        behavior_policy_estimator,
+        train_eps,                 # use a slice of training data
+        n_actions,
+        title="Train-split")
+
 
     # --- Determine the latest d3rlpy log directory for saving evaluation outputs and analyzing training logs ---
     # This logic is moved from its original position later in the script.
