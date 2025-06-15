@@ -40,6 +40,14 @@ def main():
     args = config.parse_args()
     paths = config.setup_paths(args)
     
+    # Print alpha configuration
+    print(f"\n🎛️  CQL Configuration:")
+    print(f"   Alpha (conservatism weight): {args.alpha}")
+    print(f"   Gamma (discount factor): {args.gamma}")
+    print(f"   Learning rate: {args.lr}")
+    print(f"   Batch size: {args.batch}")
+    print(f"   Epochs: {args.epochs}")
+    
     device = "cpu"
     if args.gpu >= 0:
         try:
@@ -197,7 +205,7 @@ def main():
     from evaluator import CQLEvaluator
     
     cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
-    val_losses = cql_evaluator_obj.evaluate_validation_losses(test_eps)
+    val_losses = cql_evaluator_obj.evaluate_validation_losses(val_eps)
         # Vergelijk met training losses uit CSV
     if latest_log_dir_for_outputs:
         loss_csv = latest_log_dir_for_outputs / "loss.csv"

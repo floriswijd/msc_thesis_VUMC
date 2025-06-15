@@ -14,6 +14,11 @@ from d3rlpy.ope import DiscreteFQE, FQEConfig
 from d3rlpy.metrics import InitialStateValueEstimationEvaluator
 from d3rlpy.dataset import ReplayBuffer  # nodig vanaf v2.x
 from d3rlpy.dataset import create_infinite_replay_buffer
+from scipy.special import logsumexp                # fast, stable
+from d3rlpy.dataset import Episode
+from d3rlpy.algos import QLearningAlgoBase   # Fixed import for d3rlpy 2.8.1
+from d3rlpy.metrics import TDErrorEvaluator
+# from d3rlpy.dataset import MDPDataset
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -787,7 +792,7 @@ class CQLEvaluator:
         """Plot Q-value distributions"""
         q_values = []
         
-        for episode in test_episodes[:10]:  # Sample for efficiency
+        for episode in test_episodes:  # Process all episodes
             for obs in episode.observations:
                 try:
                     if hasattr(self.model, 'predict_value'):
@@ -1194,70 +1199,50 @@ class CQLEvaluator:
     
     def evaluate_validation_losses(self, val_episodes, set_name="validation"):
         """
-        Calculates TD and Conservative losses on a given set of episodes
-        by strictly following the d3rlpy documentation for flat arrays.
+        Calculates TD and Conservative losses on validation episodes using the highest-level d3rlpy approach.
+        Uses TDErrorEvaluator with episodes initialization and ReplayBuffer conversion.
         """
         from d3rlpy.metrics import TDErrorEvaluator
-        from d3rlpy.dataset import MDPDataset
+        from d3rlpy.dataset import create_infinite_replay_buffer
         import numpy as np
 
-        print(f"\n🔬 Evaluating losses for '{set_name}' set (Strict Documentation Mode)...")
+        print(f"\n🔬 Evaluating losses for '{set_name}' set (High-level d3rlpy approach)...")
 
         if not val_episodes:
             print(f"   ❌ No episodes provided for '{set_name}' set.")
             return {'td_loss': 0.0, 'conservative_loss': 0.0, 'total_loss': 0.0}
 
-        # Step 1: Flatten all episodes into single, continuous arrays.
-        all_observations = []
-        all_actions = []
-        all_rewards = []
-        all_terminals = []
-        
-        for episode in val_episodes:
-            if episode.size() == 0:
-                continue
-            all_observations.extend(episode.observations)
-            all_actions.extend(episode.actions)
-            all_rewards.extend(episode.rewards)
-            
-            # Create a 'terminals' array where only the last step is True
-            terminals = np.zeros(episode.size(), dtype=bool)
-            terminals[-1] = True
-            all_terminals.extend(terminals)
+        # Enhanced reward scale diagnostics
+        self._diagnose_reward_scale(val_episodes)
 
-        # Sanity check to ensure all arrays have the same length, as per documentation
-        if not (len(all_observations) == len(all_actions) == len(all_rewards) == len(all_terminals)):
-            print("   ❌ FATAL: After flattening episodes, arrays have mismatched lengths. Cannot proceed.")
-            print(f"      Obs: {len(all_observations)}, Act: {len(all_actions)}, Rew: {len(all_rewards)}, Term: {len(all_terminals)}")
+        # Step 1: Create ReplayBuffer directly from episodes using d3rlpy's high-level function
+        try:
+            val_replay_buffer = create_infinite_replay_buffer(val_episodes)
+            print(f"   ✅ Created ReplayBuffer from {len(val_episodes)} episodes")
+        except Exception as e:
+            print(f"   ❌ Failed to create ReplayBuffer: {e}")
             return {'td_loss': 0.0, 'conservative_loss': 0.0, 'total_loss': 0.0}
 
-        print(f"   🔍 Prepared {len(all_observations)} transitions from {len(val_episodes)} episodes.")
-
-        # Step 2: Create the MDPDataset exactly as shown in the documentation.
-        val_dataset = MDPDataset(
-            observations=np.array(all_observations),
-            actions=np.array(all_actions),
-            rewards=np.array(all_rewards),
-            terminals=np.array(all_terminals)
-        )
-
-        # Step 3: Use d3rlpy's TDErrorEvaluator. It should now work.
+        # Step 2: Calculate TD Loss using TDErrorEvaluator - the cleanest way
         td_loss = 0.0
         try:
-            td_evaluator = TDErrorEvaluator()
-            td_loss = td_evaluator(self.model, val_dataset)
+            # Initialize with episodes for focused evaluation
+            td_evaluator = TDErrorEvaluator(episodes=val_episodes)
+            # Call with algorithm and replay buffer (as per documentation)
+            td_loss = td_evaluator(self.model, val_replay_buffer)
+            print(f"   ✅ TD Loss calculated using high-level TDErrorEvaluator")
         except Exception as e:
-            print(f"   ⚠️ Could not use TDErrorEvaluator: {e}. Defaulting TD Loss to 0.")
+            print(f"   ⚠️ TDErrorEvaluator failed: {e}. Defaulting TD Loss to 0.")
             td_loss = 0.0
 
-        # Step 4: Use the corrected helper to calculate the Conservative Loss.
-        conservative_loss = self._calculate_conservative_loss(self.model, val_episodes)
+        # Step 3: Calculate Conservative Loss using our static method
+        conservative_loss = self.conservative_loss_discrete(self.model, val_episodes)
 
-        # Step 5: Combine and return the results.
+        # Step 4: Return combined results
         results = {
-            'td_loss': td_loss,
-            'conservative_loss': conservative_loss,
-            'total_loss': td_loss + conservative_loss
+            'td_loss': float(td_loss),
+            'conservative_loss': float(conservative_loss),
+            'total_loss': float(td_loss + conservative_loss)
         }
 
         print(f"   ✅ '{set_name.capitalize()}' Loss Results:")
@@ -1266,149 +1251,427 @@ class CQLEvaluator:
         print(f"      Total Loss:       {results['total_loss']:.6f}")
         
         return results
-
-    def _calculate_conservative_loss(self, model, episodes):
+    @staticmethod
+    def conservative_loss_discrete(
+        algo: QLearningAlgoBase,
+        episodes: list,
+        alpha: float | None = None,
+        batch_size: int = 8192,
+    ) -> float:
         """
-        Calculates the conservative loss component for CQL.
-        This version uses the correct Q-function interface.
-        """
-        import torch
-        import numpy as np
-        # Prepareer data
-        all_observations = []
-        all_actions = []
-        
-        for episode in episodes:
-            all_observations.extend(episode.observations)
-            all_actions.extend(episode.actions)
+        Vectorised CQL regulariser on an *unseen* dataset.
+        Works with any discrete-action d3rlpy algorithm (CQL, DQN, BCQ …).
 
-        if not all_observations:
+        Parameters
+        ----------
+        algo        : trained d3rlpy algorithm (must expose `.predict_q_values`)
+        episodes    : list of d3rlpy Episode objects
+        alpha       : override weight; if None pull from algo.config.alpha
+        batch_size  : obs batch size to bound RAM usage
+
+        Returns
+        -------
+        float  –  α · E_s[logΣexp Q – Q(s,a_bc)]
+        """
+        # 1) flatten dataset --------------------------------------------------
+        obs, act = [], []
+        for ep in episodes:
+            obs.append(ep.observations)
+            act.append(ep.actions.reshape(-1))
+        observations = np.vstack(obs).astype(np.float32)
+        actions      = np.concatenate(act).astype(np.int64)
+
+        if observations.size == 0:
             return 0.0
-        
-        observations = np.array(all_observations, dtype=np.float32)
-        actions = np.array(all_actions, dtype=np.int64)
-        
-        # FIX: Get device directly from the model object
-        device = model._device
-        
-        obs_tensor = torch.FloatTensor(observations).to(device)
-        actions_tensor = torch.LongTensor(actions).to(device)
-        
-        # FIX: Use the correct Q-function interface
-        q_function = model._impl.q_function[0]  # Get the first Q-function from ModuleList
-        q_function.eval()
 
-        if hasattr(model._config, 'alpha'):
-            print(f"   [DEBUG] Using alpha value from model config: {model._config.alpha}")
+        # 2) pull α from the config if not provided - FIXED ALPHA ACCESS ----
+        if alpha is None:
+            # Try multiple paths to access alpha from the algorithm
+            if hasattr(algo, 'config') and hasattr(algo.config, 'alpha'):
+                alpha = algo.config.alpha
+                print(f"Using alpha = {alpha:.3f} from algo.config.alpha")
+            elif hasattr(algo, '_config') and hasattr(algo._config, 'alpha'):
+                alpha = algo._config.alpha
+                print(f"Using alpha = {alpha:.3f} from algo._config.alpha")
+            elif hasattr(algo, '_impl') and hasattr(algo._impl, '_alpha'):
+                alpha = algo._impl._alpha
+                print(f"Using alpha = {alpha:.3f} from algo._impl._alpha")
+            else:
+                # Fallback for other algorithms or if alpha is not found
+                alpha = getattr(getattr(algo, "_config", None), "initial_alpha", 1.0)
+                print(f"Using fallback alpha = {alpha:.3f} (could not find alpha in standard locations)")
+
+        # 3) mini-batch evaluation -------------------------------------------
+        n_total, loss_sum = observations.shape[0], 0.0
+        for start in range(0, n_total, batch_size):
+            end   = start + batch_size
+            obs_b = observations[start:end]
+            act_b = actions[start:end]
+
+                                        # v2.8.1 path
+            n_actions = getattr(algo, "action_size",    # DiscreteCQL has it
+                                int(act_b.max()) + 1)
+            # repeat each state for every action
+            obs_rep = np.repeat(obs_b, n_actions, axis=0)
+            act_rep = np.tile(np.arange(n_actions), len(obs_b)).astype(np.int64)
+            act_rep = act_rep.reshape(-1, 1)            # shape (B*n_actions, 1)
+            q_flat  = np.asarray(algo.predict_value(obs_rep, act_rep)).ravel()
+            q       = q_flat.reshape(len(obs_b), n_actions)  # back to (B, n_actions)
+
+            # ---------- CQL regulariser ---------------------------------------
+            lse  = logsumexp(q, axis=1)                 # log Σ exp Q(s,a′)
+            q_bc = q[np.arange(len(q)), act_b]          # Q(s,a_bc)
+            loss_sum += np.sum(lse - q_bc)
+
+        return float(alpha * loss_sum / n_total)
+
+
+    def _diagnose_reward_scale(self, episodes):
+        """Diagnose potential reward scale issues that could cause extreme Q-values"""
+        print(f"\n💰 [REWARD SCALE DIAGNOSTICS]:")
         
-        # FIX: Get alpha from the model's config
-        alpha = model._config.alpha if hasattr(model._config, 'alpha') else 0.8
-
-        total_conservative_loss = 0.0
-        batch_size = 256
-        
-        with torch.no_grad():
-            # Add a flag to only print for the first batch
-            printed_batch_info = False
-
-            for i in range(0, len(observations), batch_size):
-                end_idx = min(i + batch_size, len(observations))
-                
-                batch_obs = obs_tensor[i:end_idx]
-                batch_actions = actions_tensor[i:end_idx]
-                
-                # ... (the rest of the q_value calculation is the same) ...
-                q_function_output = q_function(batch_obs)
-                q_values = q_function_output.q_value
-                
-                log_sum_exp_q = torch.logsumexp(q_values, dim=1)
-                
-                if batch_actions.dim() == 1:
-                    batch_actions = batch_actions.unsqueeze(1)
-                
-                behavior_q = q_values.gather(1, batch_actions).squeeze(1)
-
-                # ---- START: ADD THIS DEBUG PRINT ----
-                if not printed_batch_info:
-                    print("\n   [DEBUG] Analyzing the first batch in loss calculation:")
-                    print(f"      Alpha value (α): {alpha:.2f}")
-                    print(f"      Avg. logsumexp(Q) (model's belief about OOD actions): {log_sum_exp_q.mean().item():.4f}")
-                    print(f"      Avg. Q(s,a) (model's belief about data actions): {behavior_q.mean().item():.4f}")
-                    printed_batch_info = True
-                # ---- END: ADD THIS DEBUG PRINT ----
-
-                cql_term = log_sum_exp_q - behavior_q
-                batch_sum_conservative_loss = alpha * cql_term.mean() #was eerst sum()
-                total_conservative_loss += batch_sum_conservative_loss.item()
-        
-        return total_conservative_loss / len(observations)
-
-    def _calculate_td_loss_manual(self, episodes):
-        """
-        Handmatige TD loss berekening als fallback.
-        This version uses the correct `_impl.q_function` and `_impl.target_q_function`.
-        """
-        import torch
-        import numpy as np
-        
-        all_observations, all_actions, all_rewards, all_next_observations, all_terminals = [], [], [], [], []
+        all_rewards = []
+        episode_returns = []
         
         for episode in episodes:
-            if episode.size() == 0:
-                continue
-            all_observations.extend(episode.observations[:-1])
-            all_actions.extend(episode.actions)
+            episode_reward_sum = np.sum(episode.rewards)
+            episode_returns.append(episode_reward_sum)
             all_rewards.extend(episode.rewards)
-            all_next_observations.extend(episode.observations[1:])
-            terminals = np.zeros(len(episode.actions), dtype=bool)
-            terminals[-1] = True
-            all_terminals.extend(terminals)
         
-        if not all_observations:
-            return 0.0
+        rewards_array = np.array(all_rewards)
+        returns_array = np.array(episode_returns)
+        
+        print(f"   📊 Reward statistics:")
+        print(f"      - Total transitions: {len(rewards_array)}")
+        print(f"      - Reward range: [{rewards_array.min():.3f}, {rewards_array.max():.3f}]")
+        print(f"      - Reward mean: {rewards_array.mean():.3f}")
+        print(f"      - Reward std: {rewards_array.std():.3f}")
+        print(f"      - Reward median: {np.median(rewards_array):.3f}")
+        print(f"      - Zero rewards: {(rewards_array == 0).sum()} ({(rewards_array == 0).mean():.1%})")
+        print(f"      - Negative rewards: {(rewards_array < 0).sum()} ({(rewards_array < 0).mean():.1%})")
+        print(f"      - Positive rewards: {(rewards_array > 0).sum()} ({(rewards_array > 0).mean():.1%})")
+        
+        print(f"   📊 Episode return statistics:")
+        print(f"      - Episodes: {len(returns_array)}")
+        print(f"      - Return range: [{returns_array.min():.3f}, {returns_array.max():.3f}]")
+        print(f"      - Return mean: {returns_array.mean():.3f}")
+        print(f"      - Return std: {returns_array.std():.3f}")
+        
+        # Check for potential issues
+        if rewards_array.max() > 100 or rewards_array.min() < -100:
+            print(f"      ⚠️  WARNING: Very large reward magnitudes detected!")
+            print(f"          Consider using RewardScaler to normalize rewards")
+        
+        if abs(rewards_array.mean()) > 10:
+            print(f"      ⚠️  WARNING: Rewards not centered around zero!")
+            print(f"          Mean reward of {rewards_array.mean():.3f} could lead to large Q-values")
+        
+        if returns_array.min() < -1000 or returns_array.max() > 1000:
+            print(f"      ⚠️  WARNING: Very large episode returns detected!")
+            print(f"          With gamma={getattr(self.model._config, 'gamma', 0.99)}, Q-values could explode")
+        
+        # Estimate expected Q-values based on returns
+        gamma = getattr(self.model._config, 'gamma', 0.99)
+        avg_episode_length = len(rewards_array) / len(returns_array) if returns_array.size > 0 else 1
+        
+        # Rough estimate: Q(s,a) ≈ immediate_reward + gamma * future_return
+        estimated_q_range = [
+            rewards_array.min() + gamma * returns_array.min(),
+            rewards_array.max() + gamma * returns_array.max()
+        ]
+        
+        print(f"   🔮 Estimated Q-value range (rough): [{estimated_q_range[0]:.1f}, {estimated_q_range[1]:.1f}]")
+        if abs(estimated_q_range[0]) > 1000 or abs(estimated_q_range[1]) > 1000:
+            print(f"      ⚠️  WARNING: Estimated Q-values will be very large!")
+            print(f"          This explains the conservative loss magnitude")
+            print(f"          Consider reward scaling or reducing alpha parameter")
+
+    # def evaluate_validation_losses(self, val_episodes, set_name="validation"):
+    #     """
+    #     Calculates TD and Conservative losses on a given set of episodes
+    #     by strictly following the d3rlpy documentation for flat arrays.
+    #     """
+    #     from d3rlpy.metrics import TDErrorEvaluator
+    #     from d3rlpy.dataset import MDPDataset
+    #     import numpy as np
+
+    #     print(f"\n🔬 Evaluating losses for '{set_name}' set (Strict Documentation Mode)...")
+
+    #     if not val_episodes:
+    #         print(f"   ❌ No episodes provided for '{set_name}' set.")
+    #         return {'td_loss': 0.0, 'conservative_loss': 0.0, 'total_loss': 0.0}
+
+    #     # ADD: Enhanced reward scale diagnostics
+    #     self._diagnose_reward_scale(val_episodes)
+
+    #     # Step 1: Flatten all episodes into single, continuous arrays.
+    #     all_observations = []
+    #     all_actions = []
+    #     all_rewards = []
+    #     all_terminals = []
+        
+    #     for episode in val_episodes:
+    #         if episode.size() == 0:
+    #             continue
+    #         all_observations.extend(episode.observations)
+    #         all_actions.extend(episode.actions)
+    #         all_rewards.extend(episode.rewards)
             
-        # FIX: Get device directly from the model object
-        device = self.model._device
+    #         # Create a 'terminals' array where only the last step is True
+    #         terminals = np.zeros(episode.size(), dtype=bool)
+    #         terminals[-1] = True
+    #         all_terminals.extend(terminals)
+
+    #     # Sanity check to ensure all arrays have the same length, as per documentation
+    #     if not (len(all_observations) == len(all_actions) == len(all_rewards) == len(all_terminals)):
+    #         print("   ❌ FATAL: After flattening episodes, arrays have mismatched lengths. Cannot proceed.")
+    #         print(f"      Obs: {len(all_observations)}, Act: {len(all_actions)}, Rew: {len(all_rewards)}, Term: {len(all_terminals)}")
+    #         return {'td_loss': 0.0, 'conservative_loss': 0.0, 'total_loss': 0.0}
+
+    #     print(f"   🔍 Prepared {len(all_observations)} transitions from {len(val_episodes)} episodes.")
+
+    #     # Step 2: Create the MDPDataset exactly as shown in the documentation.
+    #     val_dataset = MDPDataset(
+    #         observations=np.array(all_observations),
+    #         actions=np.array(all_actions),
+    #         rewards=np.array(all_rewards),
+    #         terminals=np.array(all_terminals)
+    #     )
+
+    #     # Step 3: Use d3rlpy's TDErrorEvaluator. It should now work.
+    #     td_loss = 0.0
+    #     try:
+    #         td_evaluator = TDErrorEvaluator()
+    #         td_loss = td_evaluator(self.model, val_dataset)
+    #     except Exception as e:
+    #         print(f"   ⚠️ Could not use TDErrorEvaluator: {e}. Defaulting TD Loss to 0.")
+    #         td_loss = 0.0
+
+    #     # Step 4: Use the corrected helper to calculate the Conservative Loss.
+    #     conservative_loss = self.conservative_loss_discrete(self.model, val_episodes)
+
+    #     # Step 5: Combine and return the results.
+    #     results = {
+    #         'td_loss': td_loss,
+    #         'conservative_loss': conservative_loss,
+    #         'total_loss': td_loss + conservative_loss
+    #     }
+
+    #     print(f"   ✅ '{set_name.capitalize()}' Loss Results:")
+    #     print(f"      TD Loss:          {results['td_loss']:.6f}")
+    #     print(f"      Conservative Loss: {results['conservative_loss']:.6f}")
+    #     print(f"      Total Loss:       {results['total_loss']:.6f}")
+
+
+
+    # def _calculate_conservative_loss(self, model, episodes, batch_size=256):
+    #     """
+    #     Enhanced conservative loss calculation with comprehensive diagnostics
+    #     """
+    #     import torch
+    #     import numpy as np
         
-        obs_tensor = torch.FloatTensor(np.array(all_observations)).to(device)
-        actions_tensor = torch.LongTensor(np.array(all_actions)).to(device)
-        rewards_tensor = torch.FloatTensor(np.array(all_rewards)).to(device)
-        next_obs_tensor = torch.FloatTensor(np.array(all_next_observations)).to(device)
-        terminals_tensor = torch.BoolTensor(np.array(all_terminals)).to(device)
+    #     print(f"🔧 [ENHANCED CONSERVATIVE LOSS] Calculating with diagnostics...")
         
-        # FIX: Access the Q-networks via the internal _impl attribute
-        q_function = self.model._impl.q_function
-        target_q_function = self.model._impl.target_q_function
-        q_function.eval()
-        if target_q_function:
-            target_q_function.eval()
+    #     # Extract all data from episodes
+    #     observations = []
+    #     actions = []
+    #     for episode in episodes:
+    #         if episode.size() == 0:
+    #             continue
+    #         observations.extend(episode.observations)
+    #         actions.extend(episode.actions)
         
-        total_td_loss = 0.0
-        batch_size = 256
+    #     if not observations:
+    #         print("   ❌ No observations found in episodes")
+    #         return 0.0
         
-        with torch.no_grad():
-            for i in range(0, len(all_observations), batch_size):
-                end_idx = min(i + batch_size, len(all_observations))
-                
-                batch_obs = obs_tensor[i:end_idx]
-                batch_actions = actions_tensor[i:end_idx]
-                batch_rewards = rewards_tensor[i:end_idx]
-                batch_next_obs = next_obs_tensor[i:end_idx]
-                batch_terminals = terminals_tensor[i:end_idx]
-                
-                current_q_values = q_function(batch_obs)
-                current_q = current_q_values.gather(1, batch_actions.unsqueeze(1)).squeeze(1)
-                
-                if target_q_function:
-                    target_q_values = target_q_function(batch_next_obs)
-                else:
-                    target_q_values = q_function(batch_next_obs)
-                
-                max_target_q = target_q_values.max(1)[0]
-                td_target = batch_rewards + self.model.gamma * max_target_q * (~batch_terminals)
-                
-                td_loss = torch.nn.functional.mse_loss(current_q, td_target, reduction='sum')
-                total_td_loss += td_loss.item()
+    #     observations = np.array(observations)
+    #     actions = np.array(actions)
         
-        return total_td_loss / len(all_observations)
+    #     print(f"   📊 Processing {len(observations)} transitions")
+    #     print(f"   📊 Action range in data: [{actions.min()}, {actions.max()}]")
+        
+    #     # Get device more robustly - fix the type checking issue
+    #     device = torch.device('cpu')  # Default fallback
+    #     try:
+    #         # Method 1: Try to access through _impl.q_function directly
+    #         if hasattr(model, '_impl') and hasattr(model._impl, 'q_function'):
+    #             q_func_obj = model._impl.q_function
+                
+    #             # Check if it's a ModuleList or similar container
+    #             if hasattr(q_func_obj, '__len__') and len(q_func_obj) > 0:
+    #                 # It's a container, get first element
+    #                 first_q_func = q_func_obj[0]
+    #                 device = next(first_q_func.parameters()).device
+    #                 print(f"   🔧 Device from ModuleList[0]: {device}")
+    #             else:
+    #                 # It's a single module
+    #                 device = next(q_func_obj.parameters()).device
+    #                 print(f"   🔧 Device from single module: {device}")
+            
+    #         # Method 2: Fallback to any model parameters
+    #         elif hasattr(model, 'parameters'):
+    #             device = next(model.parameters()).device
+    #             print(f"   🔧 Device from model parameters: {device}")
+            
+    #     except Exception as e:
+    #         print(f"   ⚠️  Could not determine device ({e}), using CPU")
+    #         device = torch.device('cpu')
+        
+    #     print(f"   🔧 Using device: {device}")
+        
+    #     # Convert to tensors and move to device - FIX THE DIMENSION ISSUE
+    #     obs_tensor = torch.tensor(observations, dtype=torch.float32).to(device)
+        
+    #     # Ensure actions are 1D tensor for proper indexing
+    #     actions_flat = actions.flatten() if actions.ndim > 1 else actions
+    #     actions_tensor = torch.tensor(actions_flat, dtype=torch.int64).to(device)
+        
+    #     print(f"   🔧 Tensor shapes: obs={obs_tensor.shape}, actions={actions_tensor.shape}")
+
+    #     scaled_obs_tensor = model.scaler.transform(obs_tensor) #nieuw
+        
+    #     total_loss = 0.0
+    #     total_samples = 0
+    #     printed_batch_info = False
+        
+    #     with torch.no_grad():
+    #         for i in range(0, len(observations), batch_size):
+    #             end_idx = min(i + batch_size, len(observations))
+    #             # batch_obs = obs_tensor[i:end_idx]
+    #             # batch_actions = actions_tensor[i:end_idx]
+
+    #              # <<<<< FIX #2: USE THE SCALED TENSOR FOR THE BATCH >>>>>
+    #             batch_obs = scaled_obs_tensor[i:end_idx]
+    #             batch_actions = actions_tensor[i:end_idx]
+                
+    #             print(f"   🔧 Batch shapes: obs={batch_obs.shape}, actions={batch_actions.shape}")
+                
+    #             # Get Q-function more robustly - fix the access pattern
+    #             try:
+    #                 if hasattr(model, '_impl') and hasattr(model._impl, 'q_function'):
+    #                     q_function = model._impl.q_function
+                        
+    #                     # Handle different Q-function structures more carefully
+    #                     if hasattr(q_function, '__len__'):
+    #                         # It's a container (ModuleList, etc.)
+    #                         try:
+    #                             num_q_funcs = len(q_function)
+    #                             if num_q_funcs > 1:
+    #                                 # Multiple Q-networks (ensemble)
+    #                                 all_q_values = []
+    #                                 for idx in range(num_q_funcs):
+    #                                     q_func = q_function[idx]
+    #                                     q_output = q_func(batch_obs)
+    #                                     if hasattr(q_output, 'q_value'):
+    #                                         q_val = q_output.q_value
+    #                                     else:
+    #                                         q_val = q_output
+    #                                     all_q_values.append(q_val)
+    #                                 q_values = torch.stack(all_q_values).mean(dim=0)
+    #                                 if not printed_batch_info:
+    #                                     print(f"   🔧 Using ensemble of {len(all_q_values)} Q-networks")
+    #                             else:
+    #                                 # Single Q-network in container
+    #                                 q_func = q_function[0]
+    #                                 q_output = q_func(batch_obs)
+    #                                 if hasattr(q_output, 'q_value'):
+    #                                     q_values = q_output.q_value
+    #                                 else:
+    #                                     q_values = q_output
+    #                                 if not printed_batch_info:
+    #                                     print(f"   🔧 Using single Q-network from container: {type(q_func)}")
+    #                         except (IndexError, TypeError) as e:
+    #                             print(f"   ❌ Error accessing Q-function from container: {e}")
+    #                             return 0.0
+    #                     else:
+    #                         # It's a single module
+    #                         q_output = q_function(batch_obs)
+    #                         if hasattr(q_output, 'q_value'):
+    #                             q_values = q_output.q_value
+    #                         else:
+    #                             q_values = q_output
+    #                         if not printed_batch_info:
+    #                             print(f"   🔧 Using single Q-network: {type(q_function)}")
+    #                 else:
+    #                     raise AttributeError("Cannot access Q-function through _impl.q_function")
+                
+    #             except Exception as e:
+    #                 print(f"   ❌ Error accessing Q-function: {e}")
+    #                 return 0.0
+                
+    #             print(f"   🔧 Q-values shape: {q_values.shape}")
+                
+    #             # Calculate conservative loss components - FIX THE GATHER OPERATION
+    #             log_sum_exp_q = torch.logsumexp(q_values, dim=1)
+                
+    #             # Ensure proper indexing for gather operation
+    #             # batch_actions should be [batch_size] and q_values should be [batch_size, n_actions]
+    #             if batch_actions.dim() == 1 and q_values.dim() == 2:
+    #                 # This is correct - use unsqueeze(1) to make batch_actions [batch_size, 1]
+    #                 behavior_q = q_values.gather(1, batch_actions.unsqueeze(1)).squeeze(1)
+    #             elif batch_actions.dim() == 2 and batch_actions.shape[1] == 1:
+    #                 # batch_actions is already [batch_size, 1], use directly
+    #                 behavior_q = q_values.gather(1, batch_actions).squeeze(1)
+    #             else:
+    #                 print(f"   ❌ Unexpected tensor dimensions: batch_actions.shape={batch_actions.shape}, q_values.shape={q_values.shape}")
+    #                 return 0.0
+                
+    #             batch_conservative_loss = (log_sum_exp_q - behavior_q).mean()
+                
+    #             # Enhanced Diagnostic Prints
+    #             if not printed_batch_info:
+    #                 print(f"\n   🔍 [BATCH DIAGNOSTICS] Analyzing the first batch:")
+                    
+    #                 # Check for action mismatch
+    #                 argmax_actions = torch.argmax(q_values, dim=1)
+    #                 mismatch_rate = (batch_actions.squeeze() != argmax_actions).float().mean().item()
+    #                 print(f"      - Pct of times data_action != model's_best_action: {mismatch_rate:.2%}")
+                    
+    #                 # Check Q-value scale
+    #                 print(f"      - Avg Q_max (from logsumexp): {log_sum_exp_q.mean().item():.2f}")
+    #                 print(f"      - Avg Q_data: {behavior_q.mean().item():.2f}")
+    #                 print(f"      - Avg Q_min_in_batch: {q_values.min().item():.2f}")
+    #                 print(f"      - Avg Q_max_in_batch: {q_values.max().item():.2f}")
+    #                 print(f"      - Q_values shape: {q_values.shape}")
+    #                 print(f"      - batch_actions shape after processing: {batch_actions.shape}")
+    #                 print(f"      - behavior_q shape: {behavior_q.shape}")
+                    
+    #                 # Conservative loss breakdown
+    #                 print(f"      - Conservative loss components:")
+    #                 print(f"        * log_sum_exp_q mean: {log_sum_exp_q.mean().item():.6f}")
+    #                 print(f"        * behavior_q mean: {behavior_q.mean().item():.6f}")
+    #                 print(f"        * difference mean: {(log_sum_exp_q - behavior_q).mean().item():.6f}")
+                    
+    #                 # Check for extreme values
+    #                 if torch.any(torch.isnan(q_values)):
+    #                     print(f"      ⚠️  WARNING: NaN values detected in Q-values!")
+    #                 if torch.any(torch.isinf(q_values)):
+    #                     print(f"      ⚠️  WARNING: Inf values detected in Q-values!")
+    #                 if q_values.abs().max() > 1000:
+    #                     print(f"      ⚠️  WARNING: Very large Q-values detected (max: {q_values.abs().max().item():.1f})!")
+    #                     print(f"          This suggests reward scale issues or high alpha parameter")
+                    
+    #                 # Show action distribution in batch vs model preferences
+    #                 data_action_dist = torch.bincount(batch_actions.flatten(), minlength=12).float()
+    #                 data_action_dist = data_action_dist / data_action_dist.sum()
+                    
+    #                 model_action_dist = torch.bincount(argmax_actions, minlength=12).float()
+    #                 model_action_dist = model_action_dist / model_action_dist.sum()
+                    
+    #                 print(f"      - Data action distribution (top 5): {data_action_dist.topk(5)}")
+    #                 print(f"      - Model action distribution (top 5): {model_action_dist.topk(5)}")
+                    
+    #                 printed_batch_info = True
+                
+    #             total_loss += batch_conservative_loss.item() * (end_idx - i)
+    #             total_samples += (end_idx - i)
+        
+    #     avg_conservative_loss = total_loss / total_samples if total_samples > 0 else 0.0
+        
+    #     print(f"   ✅ Conservative loss calculation completed")
+    #     print(f"      Final average conservative loss: {avg_conservative_loss:.6f}")
+        
+    #     return avg_conservative_loss
 
