@@ -879,7 +879,7 @@ class CQLEvaluator:
             f.write("The evaluation demonstrates the academic rigor and clinical relevance of the CQL model ")
             f.write("for HFNC parameter optimization, providing quantitative evidence for thesis contributions.\n")
 
-    def evaluate_wis(self, episodes: list, gamma: float = 0.99, clip_ratio: float = None): # d3rlpy.dataset.Episode type hint removed for broader compatibility if needed
+    def evaluate_wis(self, episodes: list, gamma: float = 0.99, clip_ratio: float = 10): # d3rlpy.dataset.Episode type hint removed for broader compatibility if needed
         
         print("🔄 Evaluating with Weighted Importance Sampling (WIS)...")
         if self.behavior_policy_estimator is None or not self.behavior_policy_estimator.is_fitted:

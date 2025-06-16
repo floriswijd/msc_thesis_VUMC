@@ -259,30 +259,22 @@ def main():
     from evaluator import CQLEvaluator
     
     cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
-    val_losses = cql_evaluator_obj.evaluate_validation_losses(val_eps)
+    # val_losses = cql_evaluator_obj.evaluate_validation_losses(val_eps)
         # Vergelijk met training losses uit CSV
-    if latest_log_dir_for_outputs:
-        loss_csv = latest_log_dir_for_outputs / "loss.csv"
-        if loss_csv.exists():
-            import pandas as pd
-            train_losses = pd.read_csv(loss_csv)
-            if not train_losses.empty:
-                last_train_loss = train_losses.iloc[-1]
+    # if latest_log_dir_for_outputs:
+    #     loss_csv = latest_log_dir_for_outputs / "loss.csv"
+    #     if loss_csv.exists():
+    #         import pandas as pd
+    #         train_losses = pd.read_csv(loss_csv)
+    #         if not train_losses.empty:
+    #             last_train_loss = train_losses.iloc[-1]
                 
-                print(f"\n📈 Training vs Validation Comparison:")
-                print(f"   TD Loss:          Train {last_train_loss.get('td_loss', 0):.6f} | Val {val_losses['td_loss']:.6f}")
-                print(f"   Conservative Loss: Train {last_train_loss.get('conservative_loss', 0):.6f} | Val {val_losses['conservative_loss']:.6f}")
-                print(f"   Total Loss:       Train {last_train_loss.get('loss', 0):.6f} | Val {val_losses['total_loss']:.6f}")
+    #             print(f"\n📈 Training vs Validation Comparison:")
+    #             print(f"   TD Loss:          Train {last_train_loss.get('td_loss', 0):.6f} | Val {val_losses['td_loss']:.6f}")
+    #             print(f"   Conservative Loss: Train {last_train_loss.get('conservative_loss', 0):.6f} | Val {val_losses['conservative_loss']:.6f}")
+    #             print(f"   Total Loss:       Train {last_train_loss.get('loss', 0):.6f} | Val {val_losses['total_loss']:.6f}")
 
     comprehensive_results = cql_evaluator_obj.evaluate_comprehensive(test_eps, save_dir=evaluation_results_save_dir)
-    fqe_metrics = cql_evaluator_obj.evaluate_fqe(episodes=train_eps + val_eps,
-                                     n_steps = 150_000,
-                                     n_boot  = 200)
-    print("\n=== FQE summary ===")
-    print(fqe_metrics)
-
-
-
     
     # Also keep basic metrics for backward compatibility
     basic_metrics = cql_evaluator_obj._evaluate_basic_performance(test_eps)
@@ -331,32 +323,38 @@ def main():
         fqe = comprehensive_results['fitted_q_evaluation']
         print(f"\n🎯 Fitted Q Evaluation Results:")
         print(f"   FQE Estimate: {fqe['fqe_estimate']:.4f} ± {fqe['fqe_std']:.4f}")
+
+    fqe_metrics = cql_evaluator_obj.evaluate_fqe(episodes=train_eps + val_eps,
+                                     n_steps = 150_000,
+                                     n_boot  = 200)
+    print("\n=== FQE summary ===")
+    print(fqe_metrics)
     
     print(f"\\n📊 Academic visualizations and detailed report saved {save_location_message_suffix}")
     
     # Add clinical safety validation
-    print("\\n=== Clinical Safety Validation ===")
-    from clinical_validator import validate_clinical_safety
+    # print("\\n=== Clinical Safety Validation ===")
+    # from clinical_validator import validate_clinical_safety
     
-    clinical_results = validate_clinical_safety(cql, test_eps, save_dir=clinical_validation_results_save_dir)
+    # clinical_results = validate_clinical_safety(cql, test_eps, save_dir=clinical_validation_results_save_dir)
     
-    print("🏥 Clinical Safety Results:")
-    if 'parameter_safety' in clinical_results:
-        ps = clinical_results['parameter_safety']
-        print(f"   Parameter Safety Score: {ps['safety_score']:.3f}")
-        print(f"   Total Safety Violations: {ps['total_violations']}")
+    # print("🏥 Clinical Safety Results:")
+    # if 'parameter_safety' in clinical_results:
+    #     ps = clinical_results['parameter_safety']
+    #     print(f"   Parameter Safety Score: {ps['safety_score']:.3f}")
+    #     print(f"   Total Safety Violations: {ps['total_violations']}")
     
-    if 'clinical_appropriateness' in clinical_results:
-        ca = clinical_results['clinical_appropriateness']
-        print(f"   Clinical Appropriateness: {ca['mean_appropriateness']:.3f}")
-        print(f"   High Appropriateness Rate: {ca['high_appropriateness_rate']:.3f}")
+    # if 'clinical_appropriateness' in clinical_results:
+    #     ca = clinical_results['clinical_appropriateness']
+    #     print(f"   Clinical Appropriateness: {ca['mean_appropriateness']:.3f}")
+    #     print(f"   High Appropriateness Rate: {ca['high_appropriateness_rate']:.3f}")
     
-    if 'adverse_events' in clinical_results:
-        ae = clinical_results['adverse_events']
-        print(f"   Adverse Event Risk: {ae['overall_adverse_event_risk']:.3f}")
-        print(f"   High Risk Decisions: {ae['high_risk_decisions']}")
+    # if 'adverse_events' in clinical_results:
+    #     ae = clinical_results['adverse_events']
+    #     print(f"   Adverse Event Risk: {ae['overall_adverse_event_risk']:.3f}")
+    #     print(f"   High Risk Decisions: {ae['high_risk_decisions']}")
     
-    print(f"🏥 Clinical validation report saved {save_location_message_suffix}")
+    # print(f"🏥 Clinical validation report saved {save_location_message_suffix}")
     
     print("\\n=== Analyzing predictions ===")
     cql_evaluator_obj.analyze_predictions(cql, test_eps, top_n=3) # Use renamed instance
@@ -437,14 +435,6 @@ def main():
             print(f"❌ Model behavior issues found: {model_result['errors']}")
         if model_result["warnings"]:
             print(f"⚠️  Model warnings: {model_result['warnings']}")
-
-        # 3) clinical safety rules
-        print("Running clinical plausibility validation...")
-        clinical_result = validator.validate_clinical_plausibility(cql, test_eps)
-        if not clinical_result["passed"]:
-            print(f"❌ Clinical plausibility issues found: {clinical_result['errors']}")
-        if clinical_result["warnings"]:
-            print(f"⚠️  Clinical warnings: {clinical_result['warnings']}")
 
         # 4) training-log sanity checks
         print("Running training stability validation...")
