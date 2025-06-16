@@ -49,7 +49,7 @@ def plot_combined_training_curves(log_dir, save_path=None):
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     
-    plt.show()
+    # plt.show()
     return fig, ax
 
 def plot_dual_axis_curves(log_dir, save_path=None):
@@ -99,7 +99,7 @@ def plot_dual_axis_curves(log_dir, save_path=None):
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     
-    plt.show()
+    # plt.show()
     return fig, (ax1, ax2)
 
 def plot_subplots_version(log_dir, save_path=None):
@@ -141,7 +141,7 @@ def plot_subplots_version(log_dir, save_path=None):
     if save_path:
         plt.savefig(save_path, dpi=300, bbox_inches='tight')
     
-    plt.show()
+    # plt.show()
     return fig, (ax1, ax2, ax3)
 
 # Usage:

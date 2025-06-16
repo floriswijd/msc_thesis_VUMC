@@ -3,6 +3,9 @@
 import torch
 from d3rlpy.preprocessing import StandardObservationScaler
 from d3rlpy.algos import DiscreteCQL, DiscreteCQLConfig
+from d3rlpy.algos import QLearningAlgoBase
+from pathlib import Path #
+import d3rlpy
 
 
 def create_scaler():
@@ -50,3 +53,34 @@ def save_model(model, model_path):
     except Exception as e:
         print(f"❌ Could not save model: {e}")
         return False
+    
+def load_model(model_path: Path, algo_class: type[QLearningAlgoBase], device: str = "cpu"):
+    """
+    Loads a d3rlpy model from a saved .d3 file by finding its
+    corresponding params.json in the same directory.
+    """
+    try:
+        # The configuration for the run is stored in 'params.json'
+        # in the same directory as the model weights file.
+        json_path = model_path.parent / "params.json"
+
+        if not model_path.exists():
+            print(f"❌ Error: Model weights file not found at {model_path}")
+            return None
+        # if not json_path.exists():
+        #     print(f"❌ Error: JSON config file not found at {json_path}")
+        #     return None
+
+        # # Step 1: Build the empty model shell from the blueprint (params.json)
+        # loaded_model = algo_class.from_json(json_path, device=device)
+
+        # Step 2: Fill the shell with the learned weights (e.g., model_100000.d3)
+        loaded_model = d3rlpy.load_learnable(model_path)
+
+        print(f"✅ Model successfully loaded from → {model_path}")
+        return loaded_model
+    except Exception as e:
+        print(f"❌ Could not load model: {e}")
+        import traceback
+        traceback.print_exc()
+        return None

@@ -18,6 +18,14 @@ from scipy.special import logsumexp                # fast, stable
 from d3rlpy.dataset import Episode
 from d3rlpy.algos import QLearningAlgoBase   # Fixed import for d3rlpy 2.8.1
 from d3rlpy.metrics import TDErrorEvaluator
+from scope_rl.policy.head import SoftmaxHead
+from scope_rl.dataset import SyntheticDataset
+from scope_rl.policy import BaseHead, SoftmaxHead
+from scope_rl.ope import CreateOPEInput, OffPolicyEvaluation
+from scope_rl.ope.discrete import TrajectoryWiseImportanceSampling, DoublyRobust, SelfNormalizedDR
+from scope_rl.policy import EpsilonGreedyHead     
+import yaml
+
 # from d3rlpy.dataset import MDPDataset
 
 import warnings
@@ -180,6 +188,7 @@ class BehaviorPolicyEstimator:
 
 class CQLEvaluator:
     """Comprehensive evaluation framework for CQL-based HFNC parameter optimization"""
+
     
     def __init__(self, model, n_actions: int, behavior_policy_estimator: BehaviorPolicyEstimator, config_path=None):
         self.model = model
@@ -217,6 +226,275 @@ class CQLEvaluator:
             'fio2': {'min': 0.21, 'max': 1.0, 'unit': 'fraction'}  # FiO2 range
             # 'temperature': {'min': 34, 'max': 40, 'unit': '°C'}     # If temperature is controlled
         }
+
+
+
+    # def _dr_single_episode(ep, pi_b, pi_e, q_func, gamma=0.99):
+    #     s = ep.observations               # (T , 36)
+    #     a = ep.actions.reshape(-1)        # (T,)
+    #     r = ep.rewards.reshape(-1)
+
+    #     # behaviour probs and evaluation distribution
+    #     p_b = pi_b.calc_pscore_given_action(s, a)
+    #     dist = pi_e.calc_action_choice_probability(s)      # (T , 12)
+
+    #     # Q(s,a) for *all* 12 actions
+    #     q_hat = np.stack([q_func.predict_value(s, np.full(len(s), act))
+    #                     for act in range(pi_e.n_actions)], axis=1)
+
+    #     return DoublyRobust().estimate_policy_value(
+    #                 step_per_trajectory = len(a),
+    #                 action              = a,
+    #                 reward              = r,
+    #                 pscore              = p_b,
+    #                 evaluation_policy_action_dist = dist,
+    #                 state_action_value_prediction  = q_hat,
+    #                 gamma               = gamma,
+    #         )
+
+    # def doubly_robust_value_varlen(episodes, bc_model, cql_model, gamma=0.99, seed=0):
+    #     # wrap policies exactly as before
+    #     behavior_algo = bc_model[0] if isinstance(bc_model, (list, tuple)) else bc_model
+    #     pi_b = EpsilonGreedyHead(behavior_algo,  n_actions=behavior_algo.action_size,
+    #                             epsilon=0.05, name="behavior", random_state=seed)
+    #     pi_e = SoftmaxHead    (cql_model,  n_actions=cql_model.action_size,
+    #                             tau=1.0,   name="target",   random_state=seed)
+
+    #     # use the fitted FQE (already trained in your pipeline)
+    #     q_func = cql_model     # CQL exposes predict_value
+
+    #     dr_vals = [ CQLEvaluator._dr_single_episode(ep, pi_b, pi_e, q_func, gamma)
+    #                 for ep in episodes ]
+    #     return float(np.mean(dr_vals))
+
+
+
+    def episodes_to_logged_dataset(episodes: list[Episode],
+                               pi_b: EpsilonGreedyHead):
+        """
+        Convert a list of d3rlpy Episode objects into a *rectangular* logged
+        dataset required by SCOPE-RL.  Shorter episodes are padded with the
+        final (state, action), a reward of 0, and done=True.
+        """
+        L = max(len(ep.actions) for ep in episodes)          # longest trajectory
+        S, A, R, D = [], [], [], []                          # ≥—— data buckets
+
+        for ep in episodes:
+            T = len(ep.actions)
+
+            # ---- 1. observations  (T , d) -> (L , d) ----
+            obs = ep.observations
+            if T < L:
+                obs = np.vstack([obs, np.repeat(obs[-1:], L - T, axis=0)])
+            S.append(obs)
+
+            # ---- 2. actions  (T,) -> (L,)  repeat last ----
+            act = ep.actions.reshape(-1)
+            if T < L:
+                act = np.pad(act, (0, L - T), mode="edge")
+            A.append(act)
+
+            # ---- 3. rewards  (T,) -> (L,)  pad 0 ----------
+            rew = ep.rewards.reshape(-1)
+            if T < L:
+                rew = np.pad(rew, (0, L - T), constant_values=0.0)
+            R.append(rew)
+
+            # ---- 4. done flags  (T,) -> (L,)  keep True ----
+            done = np.zeros(T, dtype=bool)
+            done[-1] = bool(ep.terminated)
+            if T < L:
+                done = np.pad(done, (0, L - T), constant_values=True)
+            D.append(done)
+
+        # ---------- stack & flatten ----------
+        state   = np.vstack(S)                 # (n_trajectories * L, state_dim)
+        action  = np.concatenate(A)
+        reward  = np.concatenate(R)
+        done    = np.concatenate(D)
+
+        # ---------- behaviour-policy probabilities ----------
+        pscore  = pi_b.calc_pscore_given_action(state, action)
+        zeros = (pscore == 0).sum()
+        print(f"[DEBUG] pscore zeros: {zeros} out of {len(pscore)}")
+        if zeros:
+            print("    first few zero-indices:", np.where(pscore == 0)[0][:10])
+        pscore  = np.clip(pscore, 1e-6, 1.0) 
+
+
+        # ---------- package ----------
+        return dict(
+            size                = len(state),
+            n_trajectories      = len(episodes),
+            step_per_trajectory = L,           # uniform horizon (key point!)
+            action_type         = "discrete",
+            n_actions           = pi_b.n_actions,
+            action_dim          = 1,
+            state_dim           = state.shape[1],
+            behavior_policy     = pi_b.name,
+            dataset_id          = 0,
+            state     = state,
+            action    = action,
+            reward    = reward,
+            done      = done,
+            terminal  = done.copy(),
+            pscore    = pscore,
+        )
+ 
+    # -----------------------------------------------------------------
+    # 2)  d3rlpy algo  ->  SCOPE-RL policy head (unchanged)
+    # ------------------------------------------------------------------
+    def wrap_policy(algo, *, name, head="egreedy",    # ← add `head` switch
+                    epsilon=0.0, tau=1.0, seed=42):
+
+        if head == "softmax":                         # every action gets >0 prob
+            return SoftmaxHead(
+                base_policy  = algo,
+                n_actions    = algo.action_size,
+                tau          = tau,                   # 1.0 = fairly sharp
+                name         = name,
+                random_state = seed,
+            )
+
+        # default: ε-greedy, unchanged
+        return EpsilonGreedyHead(
+            base_policy  = algo,
+            n_actions    = algo.action_size,
+            epsilon      = epsilon,
+            name         = name,
+            random_state = seed,
+        )
+
+
+    # ------------------------------------------------------------------
+    # 3)  DR estimate without a gym.Env (unchanged except for 1-liner)
+    # ------------------------------------------------------------------
+    def doubly_robust_value(episodes, behavior_algo, eval_algo,
+                            gamma=0.99, seed=42):
+       
+
+        pi_b = EpsilonGreedyHead(
+        base_policy  = behavior_algo,
+        n_actions    = behavior_algo.action_size,
+        epsilon      = 0.05,          # ↓ ensures pscore never 0
+        name         = "behavior",
+        random_state = seed,
+)
+        pi_e = SoftmaxHead(
+        base_policy  = eval_algo,
+        n_actions    = eval_algo.action_size,
+        tau          = 1.0,            # temperature
+        name         = "target",
+        random_state = seed,
+)
+
+        logged_dataset = CQLEvaluator.episodes_to_logged_dataset(episodes,pi_b)
+
+        prep = CreateOPEInput(env=None, gamma=0.99)   # env=None is OK
+        input_dict = prep.obtain_whole_inputs(
+            logged_dataset      = logged_dataset,     # your dict
+            evaluation_policies = [pi_e],
+            behavior_policy_name= pi_b.name,
+            require_value_prediction = True,          # FQE will infer shapes from dataset
+            random_state        = 0,
+        )
+        eval_blk = input_dict[pi_e.name]
+
+        q_hat = eval_blk["state_action_value_prediction"]
+        dist  = eval_blk["evaluation_policy_action_dist"]
+        # w = dist[np.arange(len(logged_dataset["action"])), logged_dataset["action"]] / logged_dataset["pscore"]
+        # print("[DBG]  weight  max:", w.max(), "   inf:", np.isinf(w).sum())
+
+        # print("[DBG] Q-hat  NaN:", np.isnan(q_hat).any(),
+        #     "Inf:", np.isinf(q_hat).any())
+        # print("       action-dist NaN:", np.isnan(dist).any(),
+        #     "Inf:", np.isinf(dist).any())
+
+        # print("       q_hat shape", q_hat.shape,
+        #     "dist shape", dist.shape)
+        # start = 0
+        # T = logged_dataset["step_per_trajectory"]
+        # ratios = dist[start:start+T, :][
+        #             np.arange(T),
+        #             logged_dataset["action"][start:start+T]
+        #         ] / logged_dataset["pscore"][start:start+T]
+
+        # cum = np.cumprod(ratios)
+        # print("[DBG] cumulative weight max:", cum[np.isfinite(cum)].max(),
+        #     "   any inf:", np.isinf(cum).any())
+        
+        # from collections import Counter
+        # import sklearn.metrics
+        # from sklearn.metrics import confusion_matrix
+        
+        # print(Counter(logged_dataset["action"]))
+
+        # --- 2.  Distribution of predicted p-scores -----------------------
+        # ps = logged_dataset["pscore"]
+        # plt.hist(ps, bins=np.logspace(-8, 0, 60)); plt.xscale("log"); plt.show()
+
+        # # tail count
+        # print("below 1e-4:", (ps < 1e-4).sum())
+
+        # --- 3.  Confusion matrix between greedy BC action and clinician action
+        # greedy = behavior_algo.predict(logged_dataset["state"])
+        # cm = confusion_matrix(logged_dataset["action"], greedy)
+        # print(cm)
+
+        ope = OffPolicyEvaluation(
+            logged_dataset = logged_dataset,
+            ope_estimators = [SelfNormalizedDR(),DoublyRobust()]
+        )
+        values = ope.estimate_policy_value(input_dict)["target"]
+        sndr_val = values["sndr"]
+        dr_val   = values["dr"]
+        return sndr_val, dr_val
+
+    @staticmethod
+    def bootstrap_sndr_value(
+        episodes: list[Episode],
+        behavior_algo,
+        eval_algo,
+        gamma: float = 0.99,
+        seed: int = 42,
+        n_boot: int = 20,
+        alpha: float = 0.05,
+    ) -> tuple[float, float, float]:
+        """
+        Trajectory‐level bootstrap CI for Self‐Normalized DR.
+        Returns (point_estimate, lower_CI, upper_CI).
+        """
+        # helper: call your existing doubly_robust_value
+        def one_sndr(eps_batch):
+            sndr_val, _ = CQLEvaluator.doubly_robust_value(
+                eps_batch,
+                behavior_algo,
+                eval_algo,
+                gamma=gamma,
+                seed=seed,
+            )
+            print(f"[DEBUG]  one_sndr value: {sndr_val:.3f}")
+            return sndr_val
+
+        # 1) full-data point
+        theta_hat = one_sndr(episodes)
+
+        # 2) bootstrap replicates
+        rng = np.random.RandomState(seed)
+        boot_vals = []
+        N = len(episodes)
+        for _ in range(n_boot):
+            idx      = rng.randint(0, N, size=N)
+            eps_boot = [episodes[i] for i in idx]
+            boot_vals.append(one_sndr(eps_boot))
+        boot = np.array(boot_vals)
+
+        # 3) percentile CI
+        lower = np.percentile(boot, 100 * (alpha/2))
+        upper = np.percentile(boot, 100 * (1-alpha/2))
+        return theta_hat, lower, upper
+
+
     
     def add_training_params_to_metrics(self, metrics, args):
         """Add training hyperparameters to metrics for comprehensive evaluation"""
@@ -250,7 +528,7 @@ class CQLEvaluator:
         
         # Enhanced OPE methods
         print("\n🎯 Running enhanced off-policy evaluation methods...")
-        wis_results = self.evaluate_wis(test_episodes, gamma=ope_gamma, clip_ratio=ope_clip_ratio)
+        # wis_results = self.evaluate_wis(test_episodes, gamma=ope_gamma, clip_ratio=ope_clip_ratio)
         # dr_results = self.evaluate_dr(test_episodes, gamma=ope_gamma, clip_ratio=ope_clip_ratio)
         # fqe_results = self.evaluate_fqe(test_episodes)
 
@@ -259,8 +537,8 @@ class CQLEvaluator:
             'basic_performance': basic_metrics,
             'clinical_performance': clinical_metrics,
             'statistical_analysis': statistical_metrics,
-            'policy_analysis': policy_metrics,
-            'weighted_importance_sampling': wis_results
+            'policy_analysis': policy_metrics
+            # 'weighted_importance_sampling': wis_results
             # 'doubly_robust': dr_results,
             # 'fitted_q_evaluation': fqe_results,
         }
@@ -507,7 +785,9 @@ class CQLEvaluator:
         action_distribution = {}
         state_action_patterns = []
         q_value_analysis = {}
+        clinician_distribution  = {}  
         
+
         for episode in test_episodes:
             for i, obs in enumerate(episode.observations):
                 try:
@@ -529,7 +809,10 @@ class CQLEvaluator:
                             q_value_analysis[predicted_action].append(float(q_value))
                         except:
                             pass
-                    
+                    clin_act = int(episode.actions[i])
+                    if clin_act not in clinician_distribution:
+                        clinician_distribution[clin_act] = 0
+                        clinician_distribution[clin_act] += 1
                     # Store state-action pattern
                     state_action_patterns.append({
                         'state_mean': float(np.mean(obs)),
@@ -546,7 +829,8 @@ class CQLEvaluator:
             'q_value_statistics': {action: {'mean': np.mean(values), 'std': np.std(values)} 
                                  for action, values in q_value_analysis.items()},
             'policy_entropy': self._calculate_policy_entropy(action_distribution),
-            'state_action_patterns': state_action_patterns[:100]  # Sample for analysis
+            'state_action_patterns': state_action_patterns[:100],  # Sample for analysis
+            'clinician_entropy': self._calculate_policy_entropy(clinician_distribution)
         }
     
     
@@ -665,9 +949,25 @@ class CQLEvaluator:
         
         # 6. State-action heatmap
         self._plot_state_action_heatmap(test_episodes, save_dir)
+
+        self._plot_action_heatmaps(test_episodes, save_dir)
     
     def _plot_action_distribution(self, test_episodes, save_dir):
         """Compare action distributions between model and clinicians"""
+        # wherever your evaluator lives:
+        config_path = Path(__file__).resolve().parent / "config.yaml"
+        cfg = yaml.safe_load(open(config_path, "r"))
+        fio2_edges = cfg["fio2_edges"]
+        flow_edges = cfg["flow_edges"]
+
+        # build labels like "FiO₂ 21–40; Flow 0–20"
+        action_labels = []
+        for i in range(len(fio2_edges) - 1):
+            for j in range(len(flow_edges) - 1):
+                action_labels.append(
+                    f"FiO₂ {fio2_edges[i]}–{fio2_edges[i+1]}, "
+                    f"Flow {flow_edges[j]}–{flow_edges[j+1]}"
+        )
         # Extract actions
         model_actions = []
         clinician_actions = []
@@ -687,62 +987,27 @@ class CQLEvaluator:
                     clinician_actions.append(float(clinician_action))
                 except:
                     continue
+        model_counts     = np.bincount(model_actions,     minlength=cfg["n_actions"])
+        clinician_counts = np.bincount(clinician_actions, minlength=cfg["n_actions"])
         
-        if not model_actions or not clinician_actions:
-            print("⚠️ No valid actions found for plotting")
-            return
-        
-        # Create comparison plot
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
-        
-        # Determine appropriate number of bins based on unique actions
-        unique_model_actions = len(set(model_actions))
-        unique_clinician_actions = len(set(clinician_actions))
-        bins = min(20, max(unique_model_actions, unique_clinician_actions))
-        
-        # Model actions histogram
-        ax1.hist(model_actions, bins=bins, alpha=0.7, edgecolor='black', density=True)
-        ax1.set_title('CQL Model Action Distribution')
-        ax1.set_xlabel('Action')
-        ax1.set_ylabel('Density')
-        ax1.grid(True, alpha=0.3)
-        
-        # Clinician actions histogram - fix the color issue
-        ax2.hist(clinician_actions, bins=bins, alpha=0.7, edgecolor='black', 
-                facecolor='orange', density=True)
-        ax2.set_title('Clinician Action Distribution')
-        ax2.set_xlabel('Action')
-        ax2.set_ylabel('Density')
-        ax2.grid(True, alpha=0.3)
-        
-        # Add statistics to the plots
-        ax1.text(0.02, 0.98, f'Mean: {np.mean(model_actions):.2f}\nStd: {np.std(model_actions):.2f}', 
-                transform=ax1.transAxes, verticalalignment='top', 
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
-        ax2.text(0.02, 0.98, f'Mean: {np.mean(clinician_actions):.2f}\nStd: {np.std(clinician_actions):.2f}', 
-                transform=ax2.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-        
+        x     = np.arange(cfg["n_actions"])
+        width = 0.4
+
+        fig, ax = plt.subplots(figsize=(16, 6))
+        ax.bar(x - width/2, model_counts,     width, label="CQL Model",     edgecolor="black")
+        ax.bar(x + width/2, clinician_counts, width, label="Clinicians",    edgecolor="black", hatch="//")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(action_labels, rotation=45, ha="right")
+        ax.set_ylabel("Count")
+        ax.set_title("Action Frequency by FiO₂ × Flow Bin")
+        ax.legend()
+        ax.grid(alpha=0.3)
+
         plt.tight_layout()
-        plt.savefig(save_dir / 'action_distribution_comparison.png', dpi=300, bbox_inches='tight')
+        plt.savefig(save_dir / "action_distribution_bars.png", dpi=300)
         plt.close()
-        
-        # Also create a side-by-side comparison plot
-        plt.figure(figsize=(12, 6))
-        plt.hist(model_actions, bins=bins, alpha=0.6, label='CQL Model', 
-                density=True, edgecolor='black')
-        plt.hist(clinician_actions, bins=bins, alpha=0.6, label='Clinicians', 
-                density=True, edgecolor='black')
-        plt.xlabel('Action')
-        plt.ylabel('Density')
-        plt.title('Action Distribution Comparison: CQL Model vs Clinicians')
-        plt.legend()
-        plt.grid(True, alpha=0.3)
-        plt.savefig(save_dir / 'action_distribution_overlay.png', dpi=300, bbox_inches='tight')
-        plt.close()
-        
-        print(f"📊 Action distribution plots saved (Model actions: {len(model_actions)}, Clinician actions: {len(clinician_actions)})")
+        print("📊 Saved bar‐chart action distribution with actual bins.")
     
     def _plot_return_distribution(self, test_episodes, save_dir):
         """Plot episode return distributions"""
@@ -811,6 +1076,86 @@ class CQLEvaluator:
             plt.grid(True, alpha=0.3)
             plt.savefig(save_dir / 'q_value_distribution.png', dpi=300, bbox_inches='tight')
             plt.close()
+
+
+
+    def _plot_action_heatmaps(self, test_episodes, save_dir):
+        # 1) load your bin edges
+        config_path = Path(__file__).resolve().parent / "config.yaml"
+        cfg = yaml.safe_load(open(config_path, "r"))
+        fio2_edges = cfg["fio2_edges"]
+        flow_edges = cfg["flow_edges"]
+        n_fio2 = len(fio2_edges) - 1
+        n_flow = len(flow_edges) - 1
+
+        # 2) collect actions
+        model_actions = []
+        clinician_actions = []
+        for ep in test_episodes:
+            for obs, ca in zip(ep.observations, ep.actions):
+                try:
+                    ma = self.model.predict(obs.reshape(1, -1))[0]
+                    ma = int(np.asarray(ma).item())
+                    ca = int(np.asarray(ca).item())
+                    model_actions.append(ma)
+                    clinician_actions.append(ca)
+                except:
+                    continue
+
+        # 3) bin into 2D mats
+        model_counts     = np.bincount(model_actions,     minlength=n_fio2 * n_flow)
+        clinician_counts = np.bincount(clinician_actions, minlength=n_fio2 * n_flow)
+        model_mat     = model_counts.reshape(n_fio2, n_flow)
+        clinician_mat = clinician_counts.reshape(n_fio2, n_flow)
+
+        # 4) determine shared color‐scale
+        vmin = min(model_mat.min(), clinician_mat.min())
+        vmax = max(model_mat.max(), clinician_mat.max())
+
+        # 5) build axis labels
+        fio2_labels = [f"{fio2_edges[i]}–{fio2_edges[i+1]}" for i in range(n_fio2)]
+        flow_labels = [f"{flow_edges[j]}–{flow_edges[j+1]}" for j in range(n_flow)]
+
+        # 6) plot side by side with seaborn heatmap + annotations
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+
+        sns.heatmap(
+            model_mat,
+            ax=ax1,
+            vmin=vmin,
+            vmax=vmax,
+            cmap="viridis",
+            annot=True,
+            fmt="d", 
+            cbar_kws={"label": "Count"}
+        )
+        ax1.set_title("CQL Model")
+        ax1.set_xlabel("Flow bin (L/min)")
+        ax1.set_ylabel("FiO₂ bin (%)")
+        ax1.set_xticklabels(flow_labels, rotation=45, ha="right")
+        ax1.set_yticklabels(fio2_labels, rotation=0)
+
+        sns.heatmap(
+            clinician_mat,
+            ax=ax2,
+            vmin=vmin,
+            vmax=vmax,
+            cmap="viridis",
+            annot=True,
+            fmt="d",
+            cbar_kws={"label": "Count"}
+        )
+        ax2.set_title("Clinicians")
+        ax2.set_xlabel("Flow bin (L/min)")
+        ax2.set_ylabel("")   # no need to repeat y-label
+        ax2.set_xticklabels(flow_labels, rotation=45, ha="right")
+        ax2.set_yticklabels(fio2_labels, rotation=0)
+
+        plt.tight_layout()
+        plt.savefig(save_dir / "action_distribution_heatmaps.png", dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"📊 Heatmaps saved; model vs clinician action counts per FiO₂×flow bin.")
+
     
     def _plot_state_action_heatmap(self, test_episodes, save_dir):
         """Create state-action heatmap"""
@@ -836,6 +1181,8 @@ class CQLEvaluator:
             plt.grid(True, alpha=0.3)
             plt.savefig(save_dir / 'state_action_heatmap.png', dpi=300, bbox_inches='tight')
             plt.close()
+        
+
     
     def _generate_summary_report(self, save_dir):
         """Generate a comprehensive summary report for thesis"""
@@ -879,116 +1226,6 @@ class CQLEvaluator:
             f.write("The evaluation demonstrates the academic rigor and clinical relevance of the CQL model ")
             f.write("for HFNC parameter optimization, providing quantitative evidence for thesis contributions.\n")
 
-    def evaluate_wis(self, episodes: list, gamma: float = 0.99, clip_ratio: float = 10): # d3rlpy.dataset.Episode type hint removed for broader compatibility if needed
-        
-        print("🔄 Evaluating with Weighted Importance Sampling (WIS)...")
-        if self.behavior_policy_estimator is None or not self.behavior_policy_estimator.is_fitted:
-            print("⚠️ Behavior policy estimator not available or not fitted. WIS cannot be computed.")
-            return {'wis_estimate': np.nan, 'ess': 0, 'mean_trajectory_weight': np.nan, 'max_trajectory_weight': np.nan, 'min_trajectory_weight': np.nan, 'all_trajectory_weights_sample': []}
-
-        if not self.n_actions:
-            print("⚠️ n_actions not set. Cannot compute target policy probabilities for WIS.")
-            return {'wis_estimate': np.nan, 'ess': 0, 'mean_trajectory_weight': np.nan, 'max_trajectory_weight': np.nan, 'min_trajectory_weight': np.nan, 'all_trajectory_weights_sample': []}
-
-        weighted_returns_sum = 0.0
-        sum_of_weights = 0.0
-        all_trajectory_weights = []
-
-        print(f"  WIS: Processing {len(episodes)} episodes. Gamma={gamma}, Clip Ratio={clip_ratio}")
-
-        for ep_idx, episode in enumerate(episodes):
-            if episode.size() == 0: # d3rlpy.dataset.Episode uses .size()
-                if ep_idx < 3: print(f"  WIS DEBUG (Ep {ep_idx}): Empty episode, skipping.")
-                continue
-
-            trajectory_reward_discounted = 0.0 # Accumulate discounted rewards for this trajectory
-            log_rho_product_for_trajectory = 0.0
-
-            if ep_idx < 1: # Debug print for first episode only
-                print(f"  WIS DEBUG (Ep {ep_idx}, Length {episode.size()}):")
-
-            for t in range(episode.size()):
-                state = episode.observations[t:t+1] 
-                action_from_data = np.array([episode.actions[t]], dtype=np.int64) 
-                reward = episode.rewards[t]
-
-                prob_b = self.behavior_policy_estimator.get_action_probabilities(state, action_from_data)[0]
-                prob_pi = self._get_target_policy_action_probabilities(state, action_from_data)[0]
-
-                # Ensure probabilities are not zero to avoid log(0) or division by zero
-                prob_b_clipped = np.maximum(prob_b, 1e-9)
-                prob_pi_clipped = np.maximum(prob_pi, 1e-9)
-
-                log_rho_step = np.log(prob_pi_clipped) - np.log(prob_b_clipped)
-
-                if clip_ratio is not None:
-                    rho_step = np.exp(log_rho_step)
-                    clipped_rho_step = np.clip(rho_step, 0, clip_ratio)
-                    log_rho_step = np.log(clipped_rho_step) if clipped_rho_step > 0 else -np.inf
-
-                log_rho_product_for_trajectory += log_rho_step
-                trajectory_reward_discounted += (gamma**t) * reward
-                reward_scalar = float(reward.item()) if hasattr(reward, 'item') else float(reward)
-                if ep_idx < 1 and t < 5: # Debug print for first 5 steps of first episode
-                    print(f"    t={t}: s_shape={state.shape}, a={action_from_data[0]}, r={reward_scalar:.4f}, pi_b(a|s)={prob_b:.4e}, pi_CQL(a|s)={prob_pi:.4e}, log_rho_step={log_rho_step:.4f}")
-
-
-            
-            current_trajectory_weight = np.exp(log_rho_product_for_trajectory)
-            all_trajectory_weights.append(current_trajectory_weight)
-
-            weighted_returns_sum += current_trajectory_weight * trajectory_reward_discounted # Use discounted return
-            sum_of_weights += current_trajectory_weight
-
-            trajectory_reward_discounted = float(trajectory_reward_discounted.item()) if hasattr(trajectory_reward_discounted, 'item') else float(trajectory_reward_discounted)
-            current_trajectory_weight = float(current_trajectory_weight.item()) if hasattr(current_trajectory_weight, 'item') else float(current_trajectory_weight)
-            log_rho_product_for_trajectory = float(log_rho_product_for_trajectory.item()) if hasattr(log_rho_product_for_trajectory, 'item') else float(log_rho_product_for_trajectory)
-
-            if ep_idx < 1: # Debug print for first episode only
-                print(f"  WIS DEBUG (Ep {ep_idx}): traj_discounted_R={trajectory_reward_discounted:.4f}, traj_weight={current_trajectory_weight:.4e}, cumulative_log_rho={log_rho_product_for_trajectory:.4f}")
-
-
-        if sum_of_weights == 0 or np.isinf(sum_of_weights) or np.isnan(sum_of_weights):
-            print(f"⚠️ WIS: Sum of weights is zero, inf, or nan ({sum_of_weights}). Cannot compute estimate.")
-            wis_estimate = np.nan
-            ess = 0.0
-        else:
-            wis_estimate = weighted_returns_sum / sum_of_weights
-            sum_of_squared_weights = np.sum(np.square(all_trajectory_weights))
-            if sum_of_squared_weights == 0 or np.isinf(sum_of_squared_weights) or np.isnan(sum_of_squared_weights):
-                ess = 0.0
-            else:
-                ess = (sum_of_weights**2) / sum_of_squared_weights
-
-        results = {
-            'wis_estimate': float(wis_estimate),
-            'ess': float(ess),
-            'num_trajectories': len(episodes),
-            'mean_trajectory_weight': float(np.mean(all_trajectory_weights)) if all_trajectory_weights else np.nan,
-            'max_trajectory_weight': float(np.max(all_trajectory_weights)) if all_trajectory_weights else np.nan,
-            'min_trajectory_weight': float(np.min(all_trajectory_weights)) if all_trajectory_weights else np.nan,
-            'all_trajectory_weights_sample': [float(w) for w in all_trajectory_weights[:min(10, len(all_trajectory_weights))]] # Sample of weights
-        }
-        print(f"  WIS Estimate: {results['wis_estimate']:.4f}, ESS: {results['ess']:.2f}")
-        if results['ess'] < len(episodes) / 10 and len(episodes) > 10:
-            print(f"  WIS WARNING: ESS ({results['ess']:.2f}) is very low compared to num_trajectories ({len(episodes)}). Results may be unreliable.")
-        print(f"  WIS Trajectory Weights: Min={results['min_trajectory_weight']:.2e}, Mean={results['mean_trajectory_weight']:.2e}, Max={results['max_trajectory_weight']:.2e}")
-        return results
-    
-    def evaluate_dr(self, episodes, gamma=0.99, clip_ratio=None):
-        """Doubly Robust evaluation."""
-        print("🔄 Running Doubly Robust (DR) evaluation...")
-        
-        # For now, return a simplified DR estimate
-        # In a full implementation, you'd need a value function estimator
-        wis_results = self.evaluate_wis(episodes, gamma, clip_ratio)
-        
-        return {
-            'dr_estimate': wis_results['wis_estimate'],  # Simplified - use WIS as baseline
-            'dr_variance': 0.0,
-            'model_based_component': 0.0,
-            'importance_sampling_component': wis_results['wis_estimate']
-        }
     
     def episodes_to_replaybuffer(self, episodes):
         """Converteert list[d3rlpy.dataset.Episode] → ReplayBuffer."""
@@ -1008,8 +1245,6 @@ class CQLEvaluator:
                 )
         return buf
     
-
-
 
     def evaluate_fqe(
         self,

@@ -120,7 +120,30 @@ def main():
         if not train_eps:
             print("\n❌ Error: No training episodes after split. Exiting.")
             sys.exit(1)
-        
+
+        # def inspect_episode(ep, idx=0):
+        #     """Pretty-print the structure of one d3rlpy Episode object."""
+        #     print(f"\nEpisode #{idx}")
+        #     print("--------------------------------------------------")
+        #     print("Available attributes:", [attr for attr in dir(ep) if not attr.startswith('_')])
+
+        #     print(f"observations : shape {ep.observations.shape}, dtype {ep.observations.dtype}")
+        #     print(f"actions      : shape {ep.actions.shape},       dtype {ep.actions.dtype}")
+        #     print(f"rewards      : shape {ep.rewards.shape},       dtype {ep.rewards.dtype}")
+
+        #     # Newer d3rlpy (≥2.0) uses `terminated`; older versions used `terminal` or `done`.
+        #     term_flag = getattr(ep, "terminated", None)
+        #     print("terminated   :", term_flag, "(scalar)")
+            
+        #     # If you want to see the done-vector we’ll feed to scope-rl:
+        #     T = len(ep.actions)
+        #     done_vec = np.zeros(T, dtype=bool)
+        #     done_vec[-1] = bool(term_flag)
+        #     print("done vector  :", done_vec.astype(int))   # 1 == terminal step
+
+        # # ---- call it on the first few episodes ----------------------------
+        # for i, ep in enumerate(train_eps[:3]):   # `episodes` is your list
+        #     inspect_episode(ep, i)
         # Count transitions in each split
         train_transitions = dataset.count_transitions(train_eps)
         val_transitions = dataset.count_transitions(val_eps)
@@ -187,6 +210,69 @@ def main():
         trainer.check_training_logs(actual_d3rlpy_log_dir)
 
         # ADD THIS: Initialize Behavior Policy Estimator BEFORE training
+
+    # print("\n=== Fitting Behavior Policy Model (Behavior Cloning) ===")
+    # from d3rlpy.algos import DiscreteBC, DiscreteBCConfig
+    # # ADD THIS IMPORT
+    # from d3rlpy.dataset import create_infinite_replay_buffer
+
+    # # Configure and create the BC model
+    # bc_config = DiscreteBCConfig(learning_rate=1e-3)
+    # bc_model = DiscreteBC(config=bc_config, device=device, enable_ddp=False)
+    
+    # # --- THIS IS THE KEY FIX ---
+    # # Create a ReplayBuffer object for the training episodes.
+    # # The .fit() method needs this object, not a raw list.
+    # print(f"🔧 Creating replay buffer for BC model with {len(train_eps)} episodes...")
+    # bc_replay_buffer = create_infinite_replay_buffer(train_eps + val_eps)  # Combine train and validation episodes for BC training
+    # # ---------------------------
+
+    # # Train the BC model using n_steps
+    # bc_model.fit(
+    #     bc_replay_buffer,  # <--- Pass the ReplayBuffer object here
+    #     n_steps=100000,     # BC learns fast, 50k steps is often plenty
+    #     n_steps_per_epoch=1000,
+    #     show_progress=True
+    # )
+
+  # --- THIS IS THE UPDATED SECTION ---
+    print("\n=== Fitting or Loading Behavior Policy Model (Behavior Cloning) ===")
+    from d3rlpy.algos import DiscreteBC, DiscreteBCConfig
+    from d3rlpy.dataset import create_infinite_replay_buffer
+    import math
+
+    if args.bc_model_path:
+        # Load the pre-trained model
+        print(f"💾 Loading pre-trained BC model from: {args.bc_model_path}")
+        bc_model = model.load_model(Path(args.bc_model_path), algo_class=DiscreteBC, device=device)
+        if bc_model is None:
+            print("❌ Failed to load BC model. Exiting.")
+            sys.exit(1)
+    else:
+        # Train a new model as before
+        bc_config = DiscreteBCConfig(learning_rate=1e-3)
+        bc_model = DiscreteBC(config=bc_config, device=device, enable_ddp=False)
+        
+        # --- THIS IS THE KEY FIX ---
+        # Create a ReplayBuffer object for the training episodes.
+        # The .fit() method needs this object, not a raw list.
+        print(f"🔧 Creating replay buffer for BC model with {len(train_eps)} episodes...")
+        bc_replay_buffer = create_infinite_replay_buffer(train_eps + val_eps)  # Combine train and validation episodes for BC training
+        # ---------------------------
+
+        # Train the BC model using n_steps
+        bc_model.fit(
+            bc_replay_buffer,  # <--- Pass the ReplayBuffer object here
+            n_steps=100000,     # BC learns fast, 50k steps is often plenty
+            n_steps_per_epoch=1000,
+            show_progress=True
+        )
+
+        print("✅ Behavior Cloning model fitted successfully.")
+
+
+
+
     print("\n=== Initializing Enhanced Off-Policy Evaluation ===")
     from evaluator import BehaviorPolicyEstimator
     
@@ -194,11 +280,11 @@ def main():
     print("🔧 Fitting behavior policy on training episodes...")
     behavior_policy_estimator.fit(train_eps)  # Fit on training data
     print("\n=== Behaviour-policy validation ===")
-    metrics_bp = BehaviorPolicyEstimator.evaluate_behaviour_model(
-        behavior_policy_estimator,
-        train_eps,                 # use a slice of training data
-        n_actions,
-        title="Train-split")
+    # metrics_bp = BehaviorPolicyEstimator.evaluate_behaviour_model(
+    #     behavior_policy_estimator,
+    #     train_eps,                 # use a slice of training data
+    #     n_actions,
+    #     title="Train-split")
 
 
     # --- Determine the latest d3rlpy log directory for saving evaluation outputs and analyzing training logs ---
@@ -259,6 +345,56 @@ def main():
     from evaluator import CQLEvaluator
     
     cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
+    
+    # scope_rl_metrics = cql_evaluator_obj.evaluate_ope_with_scope_rl(
+    #     cql_model=cql,
+    #     bc_model=bc_model,
+    #     test_episodes=test_eps,
+    #     gamma=args.gamma
+    # )
+    # print("DR =", CQLEvaluator.doubly_robust_value(test_eps, bc_model, cql))
+    def filter_long_episodes(episodes, max_len=None, pct=75):
+        """Return two lists: kept, dropped."""
+        lengths = np.array([len(ep.actions) for ep in episodes])
+
+        if max_len is None:
+            max_len = int(np.percentile(lengths, pct))   # keep up to 95-th percentile
+
+        kept    = [ep for ep, L in zip(episodes, lengths) if L <= max_len]
+        dropped = [ep for ep, L in zip(episodes, lengths) if L >  max_len]
+        print(f"[INFO] filtering episodes longer than {max_len} steps:"
+            f"  kept {len(kept)}, dropped {len(dropped)}")
+        return kept, dropped
+
+    kept, dropped = filter_long_episodes(test_eps, max_len=None, pct=85)
+
+    # scope_rl_metrics = cql_evaluator_obj.evaluate_ope_with_scope_rl(
+    #     cql_model=cql,
+    #     bc_model=bc_model,
+    #     test_episodes=test_eps,
+    #     gamma=args.gamma
+    # )
+    print("sndr =", CQLEvaluator.doubly_robust_value(kept, bc_model, cql))
+
+
+    pt, lo, hi = CQLEvaluator.bootstrap_sndr_value(
+        kept,
+        behavior_algo = bc_model,
+        eval_algo     = cql,
+        gamma         = 0.99,
+        seed          = 0,
+        n_boot        = 200,
+        alpha         = 0.05,
+    )
+    print(f"SN-DR = {pt:.4f}")
+    print(f"95% CI = [{lo:.4f}, {hi:.4f}]")
+
+    # doubly_robust_value_varlen = CQLEvaluator.doubly_robust_value_varlen(kept, bc_model, cql)
+    # print(f"DR (Doubly Robust Value, variable length episodes) = {doubly_robust_value_varlen:.4f}")
+
+
+    print("\n=== SCOPE-RL OPE Summary ===")
+    # print(scope_rl_metrics)
     # val_losses = cql_evaluator_obj.evaluate_validation_losses(val_eps)
         # Vergelijk met training losses uit CSV
     # if latest_log_dir_for_outputs:
@@ -305,6 +441,7 @@ def main():
         pa = comprehensive_results['policy_analysis']
         print(f"🎯 Policy Entropy: {pa['policy_entropy']:.3f}")
         print(f"🎯 Action Distribution: {dict(list(pa['action_distribution'].items())[:5])}")  # Show top 5
+        print(f"clinician_entropy = {pa['clinician_entropy']:.3f}")
 
     # In main.py, after comprehensive_results = cql_evaluator_obj.evaluate_comprehensive(...)
     if 'weighted_importance_sampling' in comprehensive_results:
@@ -313,6 +450,7 @@ def main():
         print(f"   WIS Estimate: {wis['wis_estimate']:.4f}")
         print(f"   Effective Sample Size: {wis['ess']:.2f}")
         print(f"   Mean Trajectory Weight: {wis['mean_trajectory_weight']:.4f}")
+
 
     if 'doubly_robust' in comprehensive_results:
         dr = comprehensive_results['doubly_robust']
