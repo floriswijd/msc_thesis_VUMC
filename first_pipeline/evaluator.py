@@ -457,7 +457,7 @@ class CQLEvaluator:
         eval_algo,
         gamma: float = 0.99,
         seed: int = 42,
-        n_boot: int = 20,
+        n_boot: int = 1,
         alpha: float = 0.05,
     ) -> tuple[float, float, float]:
         """
@@ -1244,6 +1244,66 @@ class CQLEvaluator:
                     ep.terminals[t],
                 )
         return buf
+    
+    def evaluate_fqe2(
+    self,
+    train_episodes,       # Training data for FQE
+    test_episodes,        # Clean test data for evaluation
+    n_steps     = 150_000,
+    n_boot      = 200,
+    discount    = 0.99,
+):
+        """Return dict met punt-schatting en 95%-BI van V^{π_CQL} via FQE."""
+        print(f"🔄  FQE: Training on {len(train_episodes)} episodes, evaluating on {len(test_episodes)} test episodes")
+
+        # 1) Train FQE on training data only
+        train_buffer = create_infinite_replay_buffer(train_episodes)
+        
+        fqe_cfg = FQEConfig(
+            learning_rate = 3e-4,
+            gamma = discount
+        )
+        fqe = DiscreteFQE(
+            algo   = self.model,
+            config = fqe_cfg,
+            device = "cpu",
+        )
+
+        # 2) Train the FQE model on training data
+        init_eval = InitialStateValueEstimationEvaluator()
+        fqe.fit(
+            train_buffer,
+            n_steps = n_steps,
+            evaluators= {"init_value": init_eval},
+            show_progress=True,
+        )
+        
+        # 3) Evaluate on clean test data
+        test_buffer = create_infinite_replay_buffer(test_episodes)
+        point_est = float(init_eval(fqe, test_buffer))
+        print(f"   ➜ punt-schatting V̂ = {point_est:.3f}")
+
+        # 4) Bootstrap CI using test episodes only
+        print(f"🔁  Bootstrappen ({n_boot} replicaties)…")
+        boot_vals = []
+        rng = np.random.default_rng(0)
+        for i in range(n_boot):
+            # Bootstrap from TEST episodes, not training
+            boot_eps = list(rng.choice(test_episodes, size=len(test_episodes), replace=True))
+            boot_buf = create_infinite_replay_buffer(boot_eps)
+            v_hat = float(init_eval(fqe, boot_buf))
+            boot_vals.append(v_hat)
+
+        ci_low, ci_high = np.percentile(boot_vals, [2.5, 97.5])
+        print(f"✅  FQE klaar:  {point_est:.2f}  [95 % CI {ci_low:.2f} – {ci_high:.2f}]")
+
+        return {
+            "fqe_estimate": point_est,
+            "ci_95": [float(ci_low), float(ci_high)],
+            "fqe_std": float(np.std(boot_vals)),
+            "n_steps": int(n_steps),
+            "n_boot":  int(n_boot),
+        }
     
 
     def evaluate_fqe(

@@ -383,7 +383,7 @@ def main():
         eval_algo     = cql,
         gamma         = 0.99,
         seed          = 0,
-        n_boot        = 200,
+        n_boot        = 1,
         alpha         = 0.05,
     )
     print(f"SN-DR = {pt:.4f}")
@@ -461,6 +461,12 @@ def main():
         fqe = comprehensive_results['fitted_q_evaluation']
         print(f"\n🎯 Fitted Q Evaluation Results:")
         print(f"   FQE Estimate: {fqe['fqe_estimate']:.4f} ± {fqe['fqe_std']:.4f}")
+
+    fqe_metrics2 = cql_evaluator_obj.evaluate_fqe2(train_episodes=train_eps, test_episodes=test_eps,
+                                     n_steps = 150_000,
+                                     n_boot  = 200)
+    print("\n=== FQE summary2 ===")
+    print(fqe_metrics2)
 
     fqe_metrics = cql_evaluator_obj.evaluate_fqe(episodes=train_eps + val_eps,
                                      n_steps = 150_000,

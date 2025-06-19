@@ -4,11 +4,11 @@ import numpy as np
 import yaml
 
 # Load data
-df = pd.read_parquet("hfnc_episodes.parquet")
+df = pd.read_parquet("/Users/floppie/Documents/Msc Scriptie/HFNC codebase/first_pipeline/data/hfnc_episodes.parquet")
 counts = df["action"].value_counts().sort_index()
 
 # Load configuration from YAML file
-with open('config.yaml', 'r') as f:
+with open('/Users/floppie/Documents/Msc Scriptie/HFNC codebase/first_pipeline/config.yaml', 'r') as f:
     config = yaml.safe_load(f)
 
 # Extract parameter mappings from config
@@ -23,14 +23,19 @@ def create_action_mapping():
     
     for flow_idx in range(len(flow_edges) - 1):
         for fio2_idx in range(len(fio2_edges) - 1):
-            flow_min, flow_max = flow_edges[flow_idx], flow_edges[flow_idx + 1] - 1
-            fio2_min, fio2_max = fio2_edges[fio2_idx], fio2_edges[fio2_idx + 1] - 1
+            flow_min = flow_edges[flow_idx]
+            fio2_min = fio2_edges[fio2_idx]
             
-            # Handle edge case for maximum values
-            if flow_max == 70:  # Last flow bin goes to 70
+            # Handle maximum values explicitly
+            if flow_idx == len(flow_edges) - 2:  # Last flow bin
                 flow_max = 70
-            if fio2_max == 100:  # Last FiO2 bin goes to 100
+            else:
+                flow_max = flow_edges[flow_idx + 1] - 1
+                
+            if fio2_idx == len(fio2_edges) - 2:  # Last FiO2 bin
                 fio2_max = 100
+            else:
+                fio2_max = fio2_edges[fio2_idx + 1] - 1
                 
             mapping[action] = {
                 'flow_range': f"{flow_min}–{flow_max}",
@@ -95,16 +100,29 @@ for action_id, count in counts.items():
     fio2_idx = action_id % fio2_bins
     heatmap_data[flow_idx, fio2_idx] = count
 
-# Create flow and FiO2 labels from config
-flow_labels = [f"{flow_edges[i]}–{flow_edges[i+1]-1 if i < len(flow_edges)-2 else flow_edges[i+1]}" 
-               for i in range(len(flow_edges)-1)]
-fio2_labels = [f"{fio2_edges[i]}–{fio2_edges[i+1]-1 if i < len(fio2_edges)-2 else fio2_edges[i+1]}" 
-               for i in range(len(fio2_edges)-1)]
+# Create flow and FiO2 labels from config with proper max values
+flow_labels = []
+for i in range(len(flow_edges)-1):
+    flow_min = flow_edges[i]
+    if i == len(flow_edges)-2:  # Last bin
+        flow_max = 70  # Explicit max for flow
+    else:
+        flow_max = flow_edges[i+1] - 1
+    flow_labels.append(f"{flow_min}–{flow_max}")
+
+fio2_labels = []
+for i in range(len(fio2_edges)-1):
+    fio2_min = fio2_edges[i]
+    if i == len(fio2_edges)-2:  # Last bin
+        fio2_max = 100  # Explicit max for FiO₂
+    else:
+        fio2_max = fio2_edges[i+1] - 1
+    fio2_labels.append(f"{fio2_min}–{fio2_max}")
 
 im = ax2.imshow(heatmap_data, cmap='viridis', aspect='auto')
 ax2.set_xlabel("FiO₂ Range (%)")
 ax2.set_ylabel("Flow Rate Range (L/min)")
-ax2.set_title("Action Frequency Heatmap: Flow Rate vs FiO₂\n(From config.yaml)")
+ax2.set_title("Action Frequency Heatmap: Flow Rate vs FiO₂")
 ax2.set_xticks(range(len(fio2_labels)))
 ax2.set_xticklabels(fio2_labels)
 ax2.set_yticks(range(len(flow_labels)))
