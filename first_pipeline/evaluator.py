@@ -572,7 +572,7 @@ class CQLEvaluator:
             # Step-level action agreement
             for obs, clinician_action in zip(episode.observations, episode.actions):
                 try:
-                    predicted_action = self.model.predict(obs.reshape(1, -1))[0]
+                    predicted_action = self.model.predict(obs.reshape(1, -1))[0];
                     
                     # Convert to scalar if needed
                     if isinstance(predicted_action, np.ndarray):
@@ -975,7 +975,7 @@ class CQLEvaluator:
         for episode in test_episodes:
             for obs, clinician_action in zip(episode.observations, episode.actions):
                 try:
-                    model_action = self.model.predict(obs.reshape(1, -1))[0]
+                    model_action = self.model.predict(obs.reshape(1, -1))[0];
                     
                     # Convert numpy arrays to scalar values if needed
                     if isinstance(model_action, np.ndarray):
@@ -1373,6 +1373,307 @@ class CQLEvaluator:
             "n_steps": int(n_steps),
             "n_boot":  int(n_boot),
         }
+    
+
+    def plot_trajectory_comparison(self, test_episodes, save_dir="evaluation_results", episode_idx=0, max_episodes=5):
+        """
+        Plot trajectory comparison between model and clinician actions for specific episodes.
+        Shows both the action sequence and the underlying HFNC parameters.
+        """
+        import matplotlib.pyplot as plt
+        import yaml
+        from pathlib import Path
+        
+        print(f"📈 Plotting trajectory comparisons...")
+        
+        # Load config for action mapping
+        config_path = Path(__file__).resolve().parent / "config.yaml"
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+        
+        flow_edges = config['flow_edges']
+        fio2_edges = config['fio2_edges']
+        
+        # Create action to parameter mapping
+        def action_to_params(action_id):
+            """Convert action ID to flow and FiO2 ranges"""
+            n_fio2_bins = len(fio2_edges) - 1
+            flow_idx = action_id // n_fio2_bins
+            fio2_idx = action_id % n_fio2_bins
+            
+            flow_min = flow_edges[flow_idx]
+            flow_max = flow_edges[flow_idx + 1] if flow_idx < len(flow_edges) - 2 else 70
+            
+            fio2_min = fio2_edges[fio2_idx]
+            fio2_max = fio2_edges[fio2_idx + 1] if fio2_idx < len(fio2_edges) - 2 else 100
+            
+            return {
+                'flow_range': (flow_min, flow_max),
+                'fio2_range': (fio2_min, fio2_max),
+                'flow_mid': (flow_min + flow_max) / 2,
+                'fio2_mid': (fio2_min + fio2_max) / 2
+            }
+        
+        # NEW: Function to bin continuous HFNC parameters to discrete actions
+        def params_to_action(flow_rate, fio2_percent):
+            """Convert continuous HFNC parameters to discrete action ID"""
+            # Find which bin the flow rate falls into
+            flow_bin = -1
+            for i in range(len(flow_edges) - 1):
+                if flow_edges[i] <= flow_rate < flow_edges[i + 1]:
+                    flow_bin = i
+                    break
+            if flow_bin == -1:  # Handle edge case for maximum value
+                flow_bin = len(flow_edges) - 2
+            
+            # Find which bin the FiO2 falls into
+            fio2_bin = -1
+            for i in range(len(fio2_edges) - 1):
+                if fio2_edges[i] <= fio2_percent < fio2_edges[i + 1]:
+                    fio2_bin = i
+                    break
+            if fio2_bin == -1:  # Handle edge case for maximum value
+                fio2_bin = len(fio2_edges) - 2
+            
+            # Convert to action ID
+            n_fio2_bins = len(fio2_edges) - 1
+            action_id = flow_bin * n_fio2_bins + fio2_bin
+            return action_id
+        
+        # Process episodes
+        episodes_to_plot = min(max_episodes, len(test_episodes))
+        
+        for ep_idx in range(episodes_to_plot):
+            episode = test_episodes[ep_idx]
+            
+            # Get model predictions and binned clinician actions for this episode
+            model_actions = []
+            clinician_actions_binned = []
+            clinician_actions_original = []
+            rewards = []
+            
+            print(f"\n📊 Processing Episode {ep_idx + 1}...")
+            
+            for step, (obs, clin_action, reward) in enumerate(zip(
+                episode.observations, episode.actions, episode.rewards)):
+                
+                try:
+                    # Get model prediction (already discrete)
+                    model_action = self.model.predict(obs.reshape(1, -1))[0]
+                    
+                    # Convert to scalar if needed
+                    if isinstance(model_action, np.ndarray):
+                        model_action = int(model_action.item() if model_action.size == 1 else model_action[0])
+                    if isinstance(clin_action, np.ndarray):
+                        clin_action = int(clin_action.item() if clin_action.size == 1 else clin_action[0])
+                    
+                    model_actions.append(int(model_action))
+                    
+                    # NEW: Handle clinician action binning
+                    # If clinician actions are already discrete (action IDs), use them directly
+                    if isinstance(clin_action, (int, np.integer)) and 0 <= clin_action < len(flow_edges) * len(fio2_edges):
+                        # Already binned
+                        clinician_actions_binned.append(int(clin_action))
+                        clinician_actions_original.append(int(clin_action))
+                    else:
+                        # If continuous parameters, extract flow and FiO2 from state or action
+                        # You'll need to adapt this based on your data structure
+                        # For now, assuming clinician action is already an action ID
+                        clinician_actions_binned.append(int(clin_action))
+                        clinician_actions_original.append(int(clin_action))
+                    
+                    rewards.append(float(reward))
+                    
+                except Exception as e:
+                    print(f"   ⚠️ Error at step {step}: {e}")
+                    continue
+            
+            if not model_actions:
+                print(f"   ❌ No valid predictions for episode {ep_idx}")
+                continue
+                
+            # Create the plots
+            fig, ((ax1, ax2), (ax3, ax4), (ax5, ax6)) = plt.subplots(3, 2, figsize=(16, 12))
+            
+            steps = range(len(model_actions))
+            
+            # 1. Action ID comparison (NOW BOTH ARE BINNED)
+            ax1.plot(steps, model_actions, 'b-o', label='CQL Model', markersize=4, linewidth=2)
+            ax1.plot(steps, clinician_actions_binned, 'r-s', label='Clinician (Binned)', markersize=4, linewidth=2)
+            ax1.set_xlabel('Time Step')
+            ax1.set_ylabel('Action ID (Binned)')
+            ax1.set_title(f'Episode {ep_idx + 1}: Binned Action Sequence Comparison')
+            ax1.legend()
+            ax1.grid(True, alpha=0.3)
+            
+            # 2. Action agreement (NOW FAIR COMPARISON)
+            agreements = [1 if m == c else 0 for m, c in zip(model_actions, clinician_actions_binned)]
+            ax2.plot(steps, agreements, 'g-', linewidth=3, alpha=0.7)
+            ax2.fill_between(steps, agreements, alpha=0.3, color='green')
+            ax2.set_xlabel('Time Step')
+            ax2.set_ylabel('Agreement (1=Yes, 0=No)')
+            ax2.set_title(f'Binned Action Agreement Rate: {np.mean(agreements):.2%}')
+            ax2.set_ylim(-0.1, 1.1)
+            ax2.grid(True, alpha=0.3)
+            
+            # 3. Flow Rate comparison (using bin midpoints)
+            model_flows = [action_to_params(a)['flow_mid'] for a in model_actions]
+            clin_flows = [action_to_params(a)['flow_mid'] for a in clinician_actions_binned]
+            
+            ax3.plot(steps, model_flows, 'b-o', label='CQL Model', markersize=4, linewidth=2)
+            ax3.plot(steps, clin_flows, 'r-s', label='Clinician (Binned)', markersize=4, linewidth=2)
+            ax3.set_xlabel('Time Step')
+            ax3.set_ylabel('Flow Rate (L/min)')
+            ax3.set_title('Flow Rate Parameter Trajectory (Bin Midpoints)')
+            ax3.set_ylim(0, 70)  # Set consistent flow rate axis limits
+            ax3.legend()
+            ax3.grid(True, alpha=0.3)
+            
+            # 4. FiO2 comparison (using bin midpoints)
+            model_fio2 = [action_to_params(a)['fio2_mid'] for a in model_actions]
+            clin_fio2 = [action_to_params(a)['fio2_mid'] for a in clinician_actions_binned]
+            
+            ax4.plot(steps, model_fio2, 'b-o', label='CQL Model', markersize=4, linewidth=2)
+            ax4.plot(steps, clin_fio2, 'r-s', label='Clinician (Binned)', markersize=4, linewidth=2)
+            ax4.set_xlabel('Time Step')
+            ax4.set_ylabel('FiO₂ (%)')
+            ax4.set_title('FiO₂ Parameter Trajectory (Bin Midpoints)')
+            ax4.set_ylim(21, 100)  # Set consistent FiO₂ axis limits
+            ax4.legend()
+            ax4.grid(True, alpha=0.3)
+            
+            # 5. Rewards trajectory
+            ax5.plot(steps, rewards, 'purple', linewidth=2, marker='D', markersize=3)
+            ax5.axhline(y=0, color='black', linestyle='--', alpha=0.5)
+            ax5.set_xlabel('Time Step')
+            ax5.set_ylabel('Reward')
+            ax5.set_title(f'Reward Trajectory (Total: {sum(rewards):.3f})')
+            ax5.grid(True, alpha=0.3)
+            
+            # 6. Parameter space visualization (Flow vs FiO2) - NOW FAIR COMPARISON
+            ax6.scatter(clin_fio2, clin_flows, c='red', s=50, alpha=0.7, label='Clinician (Binned)', marker='s')
+            ax6.scatter(model_fio2, model_flows, c='blue', s=50, alpha=0.7, label='CQL Model', marker='o')
+            
+            # Connect points to show trajectory
+            ax6.plot(clin_fio2, clin_flows, 'r--', alpha=0.5, linewidth=1)
+            ax6.plot(model_fio2, model_flows, 'b--', alpha=0.5, linewidth=1)
+            
+            # Mark start and end
+            if len(clin_fio2) > 0:
+                ax6.scatter(clin_fio2[0], clin_flows[0], c='red', s=100, marker='*', label='Start (Clin)')
+                ax6.scatter(model_fio2[0], model_flows[0], c='blue', s=100, marker='*', label='Start (Model)')
+            
+            ax6.set_xlabel('FiO₂ (%) - Bin Midpoints')
+            ax6.set_ylabel('Flow Rate (L/min) - Bin Midpoints')
+            ax6.set_title('Parameter Space Trajectory (Fair Binned Comparison)')
+            
+            # Set axis limits to show full clinical ranges
+            ax6.set_xlim(21, 100)  # FiO₂ from 21% to 100%
+            ax6.set_ylim(0, 70)    # Flow rate from 0 to 70 L/min
+            
+            ax6.legend()
+            ax6.grid(True, alpha=0.3)
+            
+            plt.tight_layout()
+            plt.savefig(save_dir / f'trajectory_episode_{ep_idx + 1}_binned.png', dpi=300, bbox_inches='tight')
+            plt.close()
+            
+            # Print episode summary
+            agreement_rate = np.mean(agreements)
+            print(f"   ✅ Episode {ep_idx + 1} Summary (Binned Comparison):")
+            print(f"      - Steps: {len(model_actions)}")
+            print(f"      - Binned agreement rate: {agreement_rate:.2%}")
+            print(f"      - Total reward: {sum(rewards):.3f}")
+            print(f"      - Flow range (Model): {min(model_flows):.1f} - {max(model_flows):.1f} L/min")
+            print(f"      - Flow range (Clinician): {min(clin_flows):.1f} - {max(clin_flows):.1f} L/min")
+            print(f"      - FiO₂ range (Model): {min(model_fio2):.1f} - {max(model_fio2):.1f}%")
+            print(f"      - FiO₂ range (Clinician): {min(clin_fio2):.1f} - {max(clin_fio2):.1f}%")
+    
+        # Create summary plot across all episodes
+        self._plot_trajectory_summary(test_episodes[:episodes_to_plot], save_dir)
+    
+        print(f"📊 Binned trajectory plots saved to {save_dir}")
+
+    def _plot_trajectory_summary(self, episodes, save_dir):
+        """Create a summary plot showing patterns across multiple episodes"""
+        
+        all_agreements = []
+        episode_lengths = []
+        episode_returns = []
+        
+        for ep_idx, episode in enumerate(episodes):
+            model_actions = []
+            clinician_actions = []
+            
+            for obs, clin_action in zip(episode.observations, episode.actions):
+                try:
+                    model_action = self.model.predict(obs.reshape(1, -1))[0]
+                    if isinstance(model_action, np.ndarray):
+                        model_action = int(model_action.item() if model_action.size == 1 else model_action[0])
+                    if isinstance(clin_action, np.ndarray):
+                        clin_action = int(clin_action.item() if clin_action.size == 1 else clin_action[0])
+                        
+                    model_actions.append(int(model_action))
+                    clinician_actions.append(int(clin_action))
+                except:
+                    continue
+            
+            if model_actions:
+                agreements = [1 if m == c else 0 for m, c in zip(model_actions, clinician_actions)]
+                all_agreements.append(np.mean(agreements))
+                episode_lengths.append(len(model_actions))
+                episode_returns.append(np.sum(episode.rewards))
+        
+        # Create summary plots
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(12, 8))
+        
+        # 1. Agreement rates across episodes
+        ax1.bar(range(len(all_agreements)), all_agreements, alpha=0.7, color='green')
+        ax1.axhline(y=np.mean(all_agreements), color='red', linestyle='--', 
+                    label=f'Mean: {np.mean(all_agreements):.2%}')
+        ax1.set_xlabel('Episode')
+        ax1.set_ylabel('Agreement Rate')
+        ax1.set_title('Action Agreement Across Episodes')
+        ax1.legend()
+        ax1.grid(True, alpha=0.3)
+        
+        # 2. Episode lengths
+        ax2.bar(range(len(episode_lengths)), episode_lengths, alpha=0.7, color='blue')
+        ax2.set_xlabel('Episode')
+        ax2.set_ylabel('Episode Length (Steps)')
+        ax2.set_title('Episode Lengths')
+        ax2.grid(True, alpha=0.3)
+        
+        # 3. Episode returns
+        ax3.bar(range(len(episode_returns)), episode_returns, alpha=0.7, color='purple')
+        ax3.axhline(y=np.mean(episode_returns), color='red', linestyle='--',
+                    label=f'Mean: {np.mean(episode_returns):.3f}')
+        ax3.set_xlabel('Episode')
+        ax3.set_ylabel('Episode Return')
+        ax3.set_title('Episode Returns')
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        
+        # 4. Agreement vs Return correlation
+        ax4.scatter(all_agreements, episode_returns, alpha=0.7)
+        ax4.set_xlabel('Agreement Rate')
+        ax4.set_ylabel('Episode Return')
+        ax4.set_title('Agreement Rate vs Episode Return')
+        ax4.grid(True, alpha=0.3)
+        
+        # Add correlation coefficient
+        if len(all_agreements) > 1:
+            corr_coef = np.corrcoef(all_agreements, episode_returns)[0, 1]
+            ax4.text(0.05, 0.95, f'Correlation: {corr_coef:.3f}', 
+                    transform=ax4.transAxes, bbox=dict(boxstyle="round", facecolor='wheat'))
+        
+        plt.tight_layout()
+        plt.savefig(save_dir / 'trajectory_summary.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+
+
+
 
     
     def _generate_enhanced_summary_report(self, save_dir):
@@ -1680,293 +1981,4 @@ class CQLEvaluator:
             print(f"      ⚠️  WARNING: Estimated Q-values will be very large!")
             print(f"          This explains the conservative loss magnitude")
             print(f"          Consider reward scaling or reducing alpha parameter")
-
-    # def evaluate_validation_losses(self, val_episodes, set_name="validation"):
-    #     """
-    #     Calculates TD and Conservative losses on a given set of episodes
-    #     by strictly following the d3rlpy documentation for flat arrays.
-    #     """
-    #     from d3rlpy.metrics import TDErrorEvaluator
-    #     from d3rlpy.dataset import MDPDataset
-    #     import numpy as np
-
-    #     print(f"\n🔬 Evaluating losses for '{set_name}' set (Strict Documentation Mode)...")
-
-    #     if not val_episodes:
-    #         print(f"   ❌ No episodes provided for '{set_name}' set.")
-    #         return {'td_loss': 0.0, 'conservative_loss': 0.0, 'total_loss': 0.0}
-
-    #     # ADD: Enhanced reward scale diagnostics
-    #     self._diagnose_reward_scale(val_episodes)
-
-    #     # Step 1: Flatten all episodes into single, continuous arrays.
-    #     all_observations = []
-    #     all_actions = []
-    #     all_rewards = []
-    #     all_terminals = []
-        
-    #     for episode in val_episodes:
-    #         if episode.size() == 0:
-    #             continue
-    #         all_observations.extend(episode.observations)
-    #         all_actions.extend(episode.actions)
-    #         all_rewards.extend(episode.rewards)
-            
-    #         # Create a 'terminals' array where only the last step is True
-    #         terminals = np.zeros(episode.size(), dtype=bool)
-    #         terminals[-1] = True
-    #         all_terminals.extend(terminals)
-
-    #     # Sanity check to ensure all arrays have the same length, as per documentation
-    #     if not (len(all_observations) == len(all_actions) == len(all_rewards) == len(all_terminals)):
-    #         print("   ❌ FATAL: After flattening episodes, arrays have mismatched lengths. Cannot proceed.")
-    #         print(f"      Obs: {len(all_observations)}, Act: {len(all_actions)}, Rew: {len(all_rewards)}, Term: {len(all_terminals)}")
-    #         return {'td_loss': 0.0, 'conservative_loss': 0.0, 'total_loss': 0.0}
-
-    #     print(f"   🔍 Prepared {len(all_observations)} transitions from {len(val_episodes)} episodes.")
-
-    #     # Step 2: Create the MDPDataset exactly as shown in the documentation.
-    #     val_dataset = MDPDataset(
-    #         observations=np.array(all_observations),
-    #         actions=np.array(all_actions),
-    #         rewards=np.array(all_rewards),
-    #         terminals=np.array(all_terminals)
-    #     )
-
-    #     # Step 3: Use d3rlpy's TDErrorEvaluator. It should now work.
-    #     td_loss = 0.0
-    #     try:
-    #         td_evaluator = TDErrorEvaluator()
-    #         td_loss = td_evaluator(self.model, val_dataset)
-    #     except Exception as e:
-    #         print(f"   ⚠️ Could not use TDErrorEvaluator: {e}. Defaulting TD Loss to 0.")
-    #         td_loss = 0.0
-
-    #     # Step 4: Use the corrected helper to calculate the Conservative Loss.
-    #     conservative_loss = self.conservative_loss_discrete(self.model, val_episodes)
-
-    #     # Step 5: Combine and return the results.
-    #     results = {
-    #         'td_loss': td_loss,
-    #         'conservative_loss': conservative_loss,
-    #         'total_loss': td_loss + conservative_loss
-    #     }
-
-    #     print(f"   ✅ '{set_name.capitalize()}' Loss Results:")
-    #     print(f"      TD Loss:          {results['td_loss']:.6f}")
-    #     print(f"      Conservative Loss: {results['conservative_loss']:.6f}")
-    #     print(f"      Total Loss:       {results['total_loss']:.6f}")
-
-
-
-    # def _calculate_conservative_loss(self, model, episodes, batch_size=256):
-    #     """
-    #     Enhanced conservative loss calculation with comprehensive diagnostics
-    #     """
-    #     import torch
-    #     import numpy as np
-        
-    #     print(f"🔧 [ENHANCED CONSERVATIVE LOSS] Calculating with diagnostics...")
-        
-    #     # Extract all data from episodes
-    #     observations = []
-    #     actions = []
-    #     for episode in episodes:
-    #         if episode.size() == 0:
-    #             continue
-    #         observations.extend(episode.observations)
-    #         actions.extend(episode.actions)
-        
-    #     if not observations:
-    #         print("   ❌ No observations found in episodes")
-    #         return 0.0
-        
-    #     observations = np.array(observations)
-    #     actions = np.array(actions)
-        
-    #     print(f"   📊 Processing {len(observations)} transitions")
-    #     print(f"   📊 Action range in data: [{actions.min()}, {actions.max()}]")
-        
-    #     # Get device more robustly - fix the type checking issue
-    #     device = torch.device('cpu')  # Default fallback
-    #     try:
-    #         # Method 1: Try to access through _impl.q_function directly
-    #         if hasattr(model, '_impl') and hasattr(model._impl, 'q_function'):
-    #             q_func_obj = model._impl.q_function
-                
-    #             # Check if it's a ModuleList or similar container
-    #             if hasattr(q_func_obj, '__len__') and len(q_func_obj) > 0:
-    #                 # It's a container, get first element
-    #                 first_q_func = q_func_obj[0]
-    #                 device = next(first_q_func.parameters()).device
-    #                 print(f"   🔧 Device from ModuleList[0]: {device}")
-    #             else:
-    #                 # It's a single module
-    #                 device = next(q_func_obj.parameters()).device
-    #                 print(f"   🔧 Device from single module: {device}")
-            
-    #         # Method 2: Fallback to any model parameters
-    #         elif hasattr(model, 'parameters'):
-    #             device = next(model.parameters()).device
-    #             print(f"   🔧 Device from model parameters: {device}")
-            
-    #     except Exception as e:
-    #         print(f"   ⚠️  Could not determine device ({e}), using CPU")
-    #         device = torch.device('cpu')
-        
-    #     print(f"   🔧 Using device: {device}")
-        
-    #     # Convert to tensors and move to device - FIX THE DIMENSION ISSUE
-    #     obs_tensor = torch.tensor(observations, dtype=torch.float32).to(device)
-        
-    #     # Ensure actions are 1D tensor for proper indexing
-    #     actions_flat = actions.flatten() if actions.ndim > 1 else actions
-    #     actions_tensor = torch.tensor(actions_flat, dtype=torch.int64).to(device)
-        
-    #     print(f"   🔧 Tensor shapes: obs={obs_tensor.shape}, actions={actions_tensor.shape}")
-
-    #     scaled_obs_tensor = model.scaler.transform(obs_tensor) #nieuw
-        
-    #     total_loss = 0.0
-    #     total_samples = 0
-    #     printed_batch_info = False
-        
-    #     with torch.no_grad():
-    #         for i in range(0, len(observations), batch_size):
-    #             end_idx = min(i + batch_size, len(observations))
-    #             # batch_obs = obs_tensor[i:end_idx]
-    #             # batch_actions = actions_tensor[i:end_idx]
-
-    #              # <<<<< FIX #2: USE THE SCALED TENSOR FOR THE BATCH >>>>>
-    #             batch_obs = scaled_obs_tensor[i:end_idx]
-    #             batch_actions = actions_tensor[i:end_idx]
-                
-    #             print(f"   🔧 Batch shapes: obs={batch_obs.shape}, actions={batch_actions.shape}")
-                
-    #             # Get Q-function more robustly - fix the access pattern
-    #             try:
-    #                 if hasattr(model, '_impl') and hasattr(model._impl, 'q_function'):
-    #                     q_function = model._impl.q_function
-                        
-    #                     # Handle different Q-function structures more carefully
-    #                     if hasattr(q_function, '__len__'):
-    #                         # It's a container (ModuleList, etc.)
-    #                         try:
-    #                             num_q_funcs = len(q_function)
-    #                             if num_q_funcs > 1:
-    #                                 # Multiple Q-networks (ensemble)
-    #                                 all_q_values = []
-    #                                 for idx in range(num_q_funcs):
-    #                                     q_func = q_function[idx]
-    #                                     q_output = q_func(batch_obs)
-    #                                     if hasattr(q_output, 'q_value'):
-    #                                         q_val = q_output.q_value
-    #                                     else:
-    #                                         q_val = q_output
-    #                                     all_q_values.append(q_val)
-    #                                 q_values = torch.stack(all_q_values).mean(dim=0)
-    #                                 if not printed_batch_info:
-    #                                     print(f"   🔧 Using ensemble of {len(all_q_values)} Q-networks")
-    #                             else:
-    #                                 # Single Q-network in container
-    #                                 q_func = q_function[0]
-    #                                 q_output = q_func(batch_obs)
-    #                                 if hasattr(q_output, 'q_value'):
-    #                                     q_values = q_output.q_value
-    #                                 else:
-    #                                     q_values = q_output
-    #                                 if not printed_batch_info:
-    #                                     print(f"   🔧 Using single Q-network from container: {type(q_func)}")
-    #                         except (IndexError, TypeError) as e:
-    #                             print(f"   ❌ Error accessing Q-function from container: {e}")
-    #                             return 0.0
-    #                     else:
-    #                         # It's a single module
-    #                         q_output = q_function(batch_obs)
-    #                         if hasattr(q_output, 'q_value'):
-    #                             q_values = q_output.q_value
-    #                         else:
-    #                             q_values = q_output
-    #                         if not printed_batch_info:
-    #                             print(f"   🔧 Using single Q-network: {type(q_function)}")
-    #                 else:
-    #                     raise AttributeError("Cannot access Q-function through _impl.q_function")
-                
-    #             except Exception as e:
-    #                 print(f"   ❌ Error accessing Q-function: {e}")
-    #                 return 0.0
-                
-    #             print(f"   🔧 Q-values shape: {q_values.shape}")
-                
-    #             # Calculate conservative loss components - FIX THE GATHER OPERATION
-    #             log_sum_exp_q = torch.logsumexp(q_values, dim=1)
-                
-    #             # Ensure proper indexing for gather operation
-    #             # batch_actions should be [batch_size] and q_values should be [batch_size, n_actions]
-    #             if batch_actions.dim() == 1 and q_values.dim() == 2:
-    #                 # This is correct - use unsqueeze(1) to make batch_actions [batch_size, 1]
-    #                 behavior_q = q_values.gather(1, batch_actions.unsqueeze(1)).squeeze(1)
-    #             elif batch_actions.dim() == 2 and batch_actions.shape[1] == 1:
-    #                 # batch_actions is already [batch_size, 1], use directly
-    #                 behavior_q = q_values.gather(1, batch_actions).squeeze(1)
-    #             else:
-    #                 print(f"   ❌ Unexpected tensor dimensions: batch_actions.shape={batch_actions.shape}, q_values.shape={q_values.shape}")
-    #                 return 0.0
-                
-    #             batch_conservative_loss = (log_sum_exp_q - behavior_q).mean()
-                
-    #             # Enhanced Diagnostic Prints
-    #             if not printed_batch_info:
-    #                 print(f"\n   🔍 [BATCH DIAGNOSTICS] Analyzing the first batch:")
-                    
-    #                 # Check for action mismatch
-    #                 argmax_actions = torch.argmax(q_values, dim=1)
-    #                 mismatch_rate = (batch_actions.squeeze() != argmax_actions).float().mean().item()
-    #                 print(f"      - Pct of times data_action != model's_best_action: {mismatch_rate:.2%}")
-                    
-    #                 # Check Q-value scale
-    #                 print(f"      - Avg Q_max (from logsumexp): {log_sum_exp_q.mean().item():.2f}")
-    #                 print(f"      - Avg Q_data: {behavior_q.mean().item():.2f}")
-    #                 print(f"      - Avg Q_min_in_batch: {q_values.min().item():.2f}")
-    #                 print(f"      - Avg Q_max_in_batch: {q_values.max().item():.2f}")
-    #                 print(f"      - Q_values shape: {q_values.shape}")
-    #                 print(f"      - batch_actions shape after processing: {batch_actions.shape}")
-    #                 print(f"      - behavior_q shape: {behavior_q.shape}")
-                    
-    #                 # Conservative loss breakdown
-    #                 print(f"      - Conservative loss components:")
-    #                 print(f"        * log_sum_exp_q mean: {log_sum_exp_q.mean().item():.6f}")
-    #                 print(f"        * behavior_q mean: {behavior_q.mean().item():.6f}")
-    #                 print(f"        * difference mean: {(log_sum_exp_q - behavior_q).mean().item():.6f}")
-                    
-    #                 # Check for extreme values
-    #                 if torch.any(torch.isnan(q_values)):
-    #                     print(f"      ⚠️  WARNING: NaN values detected in Q-values!")
-    #                 if torch.any(torch.isinf(q_values)):
-    #                     print(f"      ⚠️  WARNING: Inf values detected in Q-values!")
-    #                 if q_values.abs().max() > 1000:
-    #                     print(f"      ⚠️  WARNING: Very large Q-values detected (max: {q_values.abs().max().item():.1f})!")
-    #                     print(f"          This suggests reward scale issues or high alpha parameter")
-                    
-    #                 # Show action distribution in batch vs model preferences
-    #                 data_action_dist = torch.bincount(batch_actions.flatten(), minlength=12).float()
-    #                 data_action_dist = data_action_dist / data_action_dist.sum()
-                    
-    #                 model_action_dist = torch.bincount(argmax_actions, minlength=12).float()
-    #                 model_action_dist = model_action_dist / model_action_dist.sum()
-                    
-    #                 print(f"      - Data action distribution (top 5): {data_action_dist.topk(5)}")
-    #                 print(f"      - Model action distribution (top 5): {model_action_dist.topk(5)}")
-                    
-    #                 printed_batch_info = True
-                
-    #             total_loss += batch_conservative_loss.item() * (end_idx - i)
-    #             total_samples += (end_idx - i)
-        
-    #     avg_conservative_loss = total_loss / total_samples if total_samples > 0 else 0.0
-        
-    #     print(f"   ✅ Conservative loss calculation completed")
-    #     print(f"      Final average conservative loss: {avg_conservative_loss:.6f}")
-        
-    #     return avg_conservative_loss
 

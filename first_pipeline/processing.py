@@ -55,10 +55,10 @@ def main(debug=False):
     df.sort_values(["subject_id","stay_id","hfnc_episode","hour_ts"], inplace=True)
     df = add_episode_outcome(df)
 
-    vitals = ["spo2","resp_rate","heart_rate","temperature","sbp","dbp","rox","sf_ratio","fio2_frac"]
-    labs   = ["paco2","ph","pao2"]
-    ctx    = ["hrs_since_ep_start","episode_len"]
-    num_cols = vitals + labs + ctx
+    # vitals = ["spo2","resp_rate","heart_rate","temperature","sbp","dbp","rox","sf_ratio","fio2_frac"]
+    # labs   = ["paco2","ph","pao2"]
+    # ctx    = ["hrs_since_ep_start","episode_len"]
+    # num_cols = vitals + labs + ctx
     df["flow_bin"] = pd.cut(df.o2_flow, flow_edges, labels=False, right=False)
     df["fio2_bin"] = pd.cut(df.fio2,  fio2_edges, labels=False, right=False)
 
@@ -83,7 +83,7 @@ def main(debug=False):
     df["done"] = False
     df.loc[terminal_idx,"done"] = True
     df = add_rewards(df)
-    df[num_cols] = df[num_cols].astype("float32")
+    # df[num_cols] = df[num_cols].astype("float32")
     df["action"] = df["action"].astype("int64")
     df["reward"] = df["reward"].astype("float32")
     df["done"]   = df["done"].astype("bool")

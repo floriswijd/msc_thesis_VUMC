@@ -144,14 +144,14 @@ def plot_subplots_version(log_dir, save_path=None):
     # plt.show()
     return fig, (ax1, ax2, ax3)
 
-# Usage:
-log_dir = "/Users/floppie/Documents/Msc Scriptie/HFNC codebase/first_pipeline/d3rlpy_logs/runs/cql_20250615170121"
+# # Usage:
+# log_dir = "/Users/floppie/Documents/Msc Scriptie/HFNC codebase/first_pipeline/d3rlpy_logs/runs/cql_20250615170121"
 
-# Option 1: Combined plot (might be hard to read due to scale differences)
-plot_combined_training_curves(log_dir, save_path="combined_training_curves.png")
+# # Option 1: Combined plot (might be hard to read due to scale differences)
+# plot_combined_training_curves(log_dir, save_path="combined_training_curves.png")
 
-# Option 2: Dual axis plot (recommended for different scales)
-plot_dual_axis_curves(log_dir, save_path="dual_axis_training_curves.png")
+# # Option 2: Dual axis plot (recommended for different scales)
+# plot_dual_axis_curves(log_dir, save_path="dual_axis_training_curves.png")
 
-# Option 3: Subplot version (clearest view)
-plot_subplots_version(log_dir, save_path="subplot_training_curves.png")
+# # Option 3: Subplot version (clearest view)
+# plot_subplots_version(log_dir, save_path="subplot_training_curves.png")

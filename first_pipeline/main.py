@@ -323,11 +323,11 @@ def main():
     # Determine save directories
     if latest_log_dir_for_outputs:
         evaluation_results_save_dir = latest_log_dir_for_outputs
-        clinical_validation_results_save_dir = latest_log_dir_for_outputs
+        # clinical_validation_results_save_dir = latest_log_dir_for_outputs
         save_location_message_suffix = f"in '{latest_log_dir_for_outputs}'"
     else:
         evaluation_results_save_dir = Path("evaluation_results")
-        clinical_validation_results_save_dir = Path("clinical_validation")
+        # clinical_validation_results_save_dir = Path("clinical_validation")
         save_location_message_suffix = "in their respective default directories ('evaluation_results/', 'clinical_validation/')"
         print(f"⚠️  Outputs will be saved {save_location_message_suffix} as the specific run directory was not identified.")
 
@@ -343,6 +343,12 @@ def main():
     print("\\n=== Evaluating model ===")
     # Use the new comprehensive evaluation framework
     from evaluator import CQLEvaluator
+
+    from spo2_counterfactual import train_spo2_dynamics, rollout_cql_episode
+
+    dyn = train_spo2_dynamics(train_eps, n_actions, spo2_idx)
+    cf_spo2 = rollout_cql_episode(test_eps[0], cql, dyn, spo2_idx, n_actions)
+
     
     cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
     
@@ -413,6 +419,10 @@ def main():
     comprehensive_results = cql_evaluator_obj.evaluate_comprehensive(test_eps, save_dir=evaluation_results_save_dir)
     
     # Also keep basic metrics for backward compatibility
+    cql_evaluator_obj.plot_trajectory_comparison(test_eps, 
+    save_dir=Path("evaluation_results"), 
+    max_episodes=3
+)
     basic_metrics = cql_evaluator_obj._evaluate_basic_performance(test_eps)
     metrics = cql_evaluator_obj.add_training_params_to_metrics(basic_metrics, args)
     
