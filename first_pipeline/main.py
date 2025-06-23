@@ -346,8 +346,97 @@ def main():
 
     from spo2_counterfactual import train_spo2_dynamics, rollout_cql_episode
 
-    dyn = train_spo2_dynamics(train_eps, n_actions, spo2_idx)
-    cf_spo2 = rollout_cql_episode(test_eps[0], cql, dyn, spo2_idx, n_actions)
+    ##Ff spo2 plotten
+
+    def stay_of(ep):
+        idx = ep.episode_id if hasattr(ep, "episode_id") else None
+        if idx is None:                  # if attribute absent, fall back to lookup
+            idx = next(i for i, e in enumerate(mdp_dataset_full.episodes) if e is ep)
+        return mdp_dataset_full.episode_metadata[idx]["stay_id"]
+
+        # sets of stay IDs in each split
+    train_stays = {stay_of(ep) for ep in train_eps}
+    val_stays   = {stay_of(ep) for ep in val_eps}
+    test_stays  = {stay_of(ep) for ep in test_eps}
+
+
+    df_train = df[df["stay_id"].isin(train_stays)].copy()
+    df_val   = df[df["stay_id"].isin(val_stays)].copy()
+    df_test  = df[df["stay_id"].isin(test_stays)].copy()
+    state_cols = data_dict["state_columns"]      # <- exists here
+    print("number of features:", len(state_cols))
+    for i, col in enumerate(state_cols[:20]):    # first 20 just to keep output short
+        print(f"{i:2d}: {col}")
+
+    spo2_idx = state_cols.index("spo2")          # correct column for Episode.observations
+    print("SpO₂ sits at column", spo2_idx)
+    print(f"{len(df_train):,} rows in train  |  "
+      f"{len(df_val):,} rows in val  |  "
+      f"{len(df_test):,} rows in test")
+    
+    from spo2_counterfactual import train_spo2_dynamics
+
+
+    
+
+
+
+    n_actions = cql.action_size           # 12
+    dyn_model = train_spo2_dynamics(
+        train_eps=train_eps,              # only training episodes
+        n_actions=n_actions,
+        spo2_idx=spo2_idx,
+        obs_scaler=scaler,  # use the same scaler as CQL
+    )
+
+    from spo2_counterfactual import (
+    rollout_cql_episode, plot_spo2_trajectories,rollout_cql_episode_spo2_only,
+                                 plot_actions_and_spo2
+)
+    # import numpy as np
+
+    ep = test_eps[0]                      # pick a test episode
+    t  = np.arange(len(ep))
+
+    # observed SpO₂ (clinician)
+    spo2_obs = ep.observations[:, spo2_idx]
+
+    # model-predicted SpO₂ under clinician actions (sanity check)
+    eye = np.eye(n_actions)
+    clin_act  = ep.actions.reshape(-1).astype(int)
+    sa_clin = np.hstack([
+        ep.observations[:-1],                    # shape (T-1, d)
+        eye[ep.actions[:-1].reshape(-1)]         # shape (T-1, 12)  ← flatten!
+])
+    spo2_pred_clin = np.concatenate([[spo2_obs[0]], dyn_model.predict(sa_clin)])
+
+    # counter-factual SpO₂ under CQL actions
+    spo2_pred_cql = rollout_cql_episode(
+        ep, cql, dyn_model, spo2_idx, n_actions
+    )
+    ep_idx = next(i for i, e in enumerate(mdp_dataset_full.episodes) if e is ep)
+
+    plot_spo2_trajectories(
+        time_points=t,
+        spo2_obs=spo2_obs,
+        spo2_pred_clin=spo2_pred_clin,
+        spo2_pred_cql=spo2_pred_cql,
+        title=f"Episode {ep_idx} – counter-factual SpO₂"
+    )
+
+    spo2_pred_clin = np.r_[spo2_obs[0], dyn_model.predict(sa_clin)]
+
+    # CQL roll-out on its own predicted SpO₂
+    spo2_cf, cql_act = rollout_cql_episode_spo2_only(
+                            ep, cql, dyn_model, spo2_idx, n_actions)
+
+    # plot
+    plot_actions_and_spo2(
+            ep,
+            clin_act, cql_act,
+            spo2_obs, spo2_pred_clin, spo2_cf,
+            n_actions = n_actions,
+            title     = "Episode 0 – actions and counter-factual SpO₂")
 
     
     cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
