@@ -129,11 +129,24 @@ def train_spo2_dynamics(
         lag2_spo2 = s_tm2[:, spo2_idx]
         lag1_rox  = s_tm1[:, rox_idx]
 
-        sa = np.hstack([ s_t,
-                        eye[a_t],
-                        lag1_spo2[:, None],
-                        lag2_spo2[:, None],
-                        lag1_rox[:,  None] ])
+        # sa = np.hstack([ s_t,
+        #                 eye[a_t],
+        #                 lag1_spo2[:, None],
+        #                 lag2_spo2[:, None],
+        #                 lag1_rox[:,  None] ])
+        
+        flow_mid, fio2_mid = id_to_midpoints(a_t)
+
+        sa = np.hstack([
+                s_t,
+                eye[a_t],                  # 12 sparse cols
+                flow_mid[:, None],         # 1 dense col  ← NEW
+                fio2_mid[:, None],         # 1 dense col  ← NEW
+                lag1_spo2[:, None],
+                lag2_spo2[:, None],
+                lag1_rox[:, None]
+        ])
+
 
         X.append(sa)
         y.append(y_tp1)
@@ -380,6 +393,51 @@ def rollout_cql_episode_spo2_only(ep, cql_model, dyn_model,
 #         plt.savefig(save, dpi=300)
 #     else:
 #         plt.show()
+
+def predict_spo2_one_step(obs,            # (T, d) recorded states
+                          actions,        # (T,) int ids to use
+                          dyn_model,
+                          spo2_idx: int,
+                          rox_idx: int,
+                          n_actions: int):
+    """
+    Return a length-T array of one-step SpO₂ predictions, conditioning
+    on the *logged* state at every step (open-loop).
+    """
+    eye = np.eye(n_actions)
+    # re-create the same feature matrix you trained on  (skip t<2 for lags)
+    s_t      = obs[2:-1]
+    a_t      = actions[2:-1].reshape(-1)
+    lag1_spo2 = obs[1:-2, spo2_idx]
+    lag2_spo2 = obs[0:-3, spo2_idx]
+    lag1_rox  = obs[1:-2, rox_idx]
+
+    # X = np.hstack([s_t,
+    #                eye[a_t],
+    #                lag1_spo2[:, None],
+    #                lag2_spo2[:, None],
+    #                lag1_rox[:,  None]])
+    flow_mid, fio2_mid = id_to_midpoints(a_t)
+
+    X = np.hstack([
+                s_t,
+                eye[a_t],                  # 12 sparse cols
+                flow_mid[:, None],         # 1 dense col  ← NEW
+                fio2_mid[:, None],         # 1 dense col  ← NEW
+                lag1_spo2[:, None],
+                lag2_spo2[:, None],
+                lag1_rox[:, None]
+        ])
+
+
+    pred = dyn_model.predict(X)  
+    # print("DEBUG one-step  X.shape =", X.shape)   # <-- add this line once
+
+    # prepend the first two logged values so length==T
+    # return np.r_[obs[:2, spo2_idx], dyn_model.predict(X)]
+    return np.r_[obs[:2, spo2_idx], pred, pred[-1]]
+
+
 
 def plot_actions_and_spo2(ep,
                           clin_act, cql_act,
