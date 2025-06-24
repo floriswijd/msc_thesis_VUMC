@@ -117,6 +117,21 @@ def main():
             random_state=42
         )
 
+        MIN_LEN = 4
+
+        def filter_short(eps):
+            return [ep for ep in eps if len(ep) >= MIN_LEN]
+
+        orig_counts = (len(train_eps), len(val_eps), len(test_eps))
+
+        train_eps = filter_short(train_eps)
+        val_eps   = filter_short(val_eps)
+        test_eps  = filter_short(test_eps)
+        new_counts = (len(train_eps), len(val_eps), len(test_eps))
+        print(f"\n📊 Dataset Split Counts (after filtering short episodes):"
+              f"\n   Training:   {new_counts[0]:,} episodes (was {orig_counts[0]:,})"
+                f"\n   Validation: {new_counts[1]:,} episodes (was {orig_counts[1]:,})"
+                f"\n   Test:       {new_counts[2]:,} episodes (was {orig_counts[2]:,})")
         if not train_eps:
             print("\n❌ Error: No training episodes after split. Exiting.")
             sys.exit(1)
@@ -370,11 +385,13 @@ def main():
 
     spo2_idx = state_cols.index("spo2")          # correct column for Episode.observations
     print("SpO₂ sits at column", spo2_idx)
+    rox_idx = state_cols.index("rox")          # correct column for Episode.observations
+    print("ROX sits at column", rox_idx)
     print(f"{len(df_train):,} rows in train  |  "
       f"{len(df_val):,} rows in val  |  "
       f"{len(df_test):,} rows in test")
     
-    from spo2_counterfactual import train_spo2_dynamics
+    from spo2_counterfactual import train_spo2_dynamics, rollout_cql_episode_spo2_only, id_to_midpoints, plot_actions_and_spo2, assemble_features
 
 
     
@@ -383,63 +400,76 @@ def main():
 
     n_actions = cql.action_size           # 12
     dyn_model = train_spo2_dynamics(
-        train_eps=train_eps,              # only training episodes
+        train_eps=train_eps + val_eps,              # only training episodes
         n_actions=n_actions,
         spo2_idx=spo2_idx,
+        rox_idx=rox_idx,  # Add ROX index for dynamics model
         obs_scaler=scaler,  # use the same scaler as CQL
     )
 
-    from spo2_counterfactual import (
-    rollout_cql_episode, plot_spo2_trajectories,rollout_cql_episode_spo2_only,
-                                 plot_actions_and_spo2
-)
-    # import numpy as np
+    # Prepare for counter-factual plotting
+    eye     = np.eye(n_actions)
+    out_dir = evaluation_results_save_dir / "counterfactual_plots"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    ep = test_eps[0]                      # pick a test episode
-    t  = np.arange(len(ep))
 
-    # observed SpO₂ (clinician)
-    spo2_obs = ep.observations[:, spo2_idx]
+    for k, ep in enumerate(test_eps[:10], start=1):
+        t = np.arange(len(ep))
+        spo2_obs  = ep.observations[:, spo2_idx]
+        clin_act  = ep.actions.reshape(-1).astype(int)
 
-    # model-predicted SpO₂ under clinician actions (sanity check)
-    eye = np.eye(n_actions)
-    clin_act  = ep.actions.reshape(-1).astype(int)
-    sa_clin = np.hstack([
-        ep.observations[:-1],                    # shape (T-1, d)
-        eye[ep.actions[:-1].reshape(-1)]         # shape (T-1, 12)  ← flatten!
-])
-    spo2_pred_clin = np.concatenate([[spo2_obs[0]], dyn_model.predict(sa_clin)])
+        # ---- clinician actions & parameters --------------------------
+        clin_act = ep.actions.reshape(-1).astype(int)
+        flow_c, fio2_c = id_to_midpoints(clin_act)
 
-    # counter-factual SpO₂ under CQL actions
-    spo2_pred_cql = rollout_cql_episode(
-        ep, cql, dyn_model, spo2_idx, n_actions
-    )
-    ep_idx = next(i for i, e in enumerate(mdp_dataset_full.episodes) if e is ep)
+        # ---- CQL roll-out -------------------------------------------
+        spo2_cf, cql_act = rollout_cql_episode_spo2_only(
+                            ep, cql, dyn_model,
+                            spo2_idx=spo2_idx,
+                            n_actions=n_actions,
+                            rox_idx=rox_idx)
+        flow_q, fio2_q = id_to_midpoints(cql_act)
 
-    plot_spo2_trajectories(
-        time_points=t,
-        spo2_obs=spo2_obs,
-        spo2_pred_clin=spo2_pred_clin,
-        spo2_pred_cql=spo2_pred_cql,
-        title=f"Episode {ep_idx} – counter-factual SpO₂"
-    )
+        # ---- clinician SpO₂ prediction for reference ----------------
+        sa_clin = assemble_features(ep.observations, ep.actions,
+                                    spo2_idx, rox_idx, np.eye(n_actions))
+        spo2_pred_clin = np.r_[ep.observations[:2, spo2_idx],
+                            dyn_model.predict(sa_clin)]
 
-    spo2_pred_clin = np.r_[spo2_obs[0], dyn_model.predict(sa_clin)]
-
-    # CQL roll-out on its own predicted SpO₂
-    spo2_cf, cql_act = rollout_cql_episode_spo2_only(
-                            ep, cql, dyn_model, spo2_idx, n_actions)
-
-    # plot
-    plot_actions_and_spo2(
-            ep,
-            clin_act, cql_act,
-            spo2_obs, spo2_pred_clin, spo2_cf,
-            n_actions = n_actions,
-            title     = "Episode 0 – actions and counter-factual SpO₂")
-
+        # ---- plot SpO₂ + action IDs (existing helper) ---------------
+        plot_actions_and_spo2(ep,
+                            clin_act, cql_act,
+                            ep.observations[:, spo2_idx],
+                            spo2_pred_clin, spo2_cf,
+                            n_actions=n_actions,
+                            title=f"Val ep {k} — action IDs",
+                            save=f"val_ep_{k:02d}_ids.png")
+        
+        # plot_actions_and_spo2(       t,
+        # flow_c, fio2_c, flow_q, fio2_q,
+        # spo2_obs, spo2_pred_clin, spo2_cf,
+        # title = f"Validation Episode {k}",
+        # save  = out_dir / f"val_ep{k:02d}_params_spo2.png")
     
-    cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
+
+        # ---- extra figure with physical parameters ------------------
+        import matplotlib.pyplot as plt
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11,3), sharex=True)
+        ax1.step(t, flow_c, c='r', where='mid', label='Clinician')
+        ax1.step(t, flow_q, c='b', where='mid', label='CQL')
+        ax1.set_ylabel("Flow (L min⁻¹)"); ax1.legend(); ax1.grid(alpha=.3)
+
+        ax2.step(t, fio2_c, c='r', where='mid', label='Clinician')
+        ax2.step(t, fio2_q, c='b', where='mid', label='CQL')
+        ax2.set_ylabel("FiO₂ (%)"); ax2.legend(); ax2.grid(alpha=.3)
+
+        plt.suptitle(f"Val ep {k} — parameter mid-points")
+        plt.tight_layout()
+        plt.savefig(f"val_ep_{k:02d}_params.png", dpi=180)
+        plt.close(fig)
+
+
+        cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
     
     # scope_rl_metrics = cql_evaluator_obj.evaluate_ope_with_scope_rl(
     #     cql_model=cql,

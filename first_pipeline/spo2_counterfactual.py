@@ -14,6 +14,8 @@ import matplotlib.pyplot as plt
 from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
+from typing import Tuple
+
 
 # ---------------------------------------------------------------------------
 # Configuration dataclass – keeps the knobs for quick experimentation
@@ -34,13 +36,54 @@ class DynConfig:
 # ---------------------------------------------------------------------------
 # Public helper 1/2 – train the forward SpO₂ model
 # ---------------------------------------------------------------------------
+# pull the cut-points you wrote in config.yaml   :contentReference[oaicite:2]{index=2}
+FLOW_EDGES = np.array([0, 20, 40, 71],  dtype=int)     # [0–20) [20–40) [40–70]
+FIO2_EDGES = np.array([21, 40, 60, 80, 101], dtype=int)# [21–40) [40–60) [60–80) [80–100]
+N_FLOW_BINS = len(FLOW_EDGES) - 1          # 3
+N_FIO2_BINS = len(FIO2_EDGES) - 1         
+N_FIO2  = len(FIO2_EDGES) - 1              # 4
+N_FLOW  = len(FLOW_EDGES) - 1              # 3
+N_ACT   = N_FLOW * N_FIO2                  # 12
+
+
+
+def action_id_to_label(a_id: int) -> str:
+    """Return a human-readable (flow, FiO₂) bin for a discrete action id."""
+    flow_idx = a_id // N_FIO2_BINS
+    fio2_idx = a_id %  N_FIO2_BINS
+    f_low, f_hi   = FLOW_EDGES[flow_idx],   FLOW_EDGES[flow_idx + 1]
+    o2_low, o2_hi = FIO2_EDGES[fio2_idx],   FIO2_EDGES[fio2_idx + 1]
+    return f"{f_low}-{f_hi} L | {o2_low}-{o2_hi} %"
+
+def id_to_midpoints(a: np.ndarray | int) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Map discrete action id(s) → mid-point flow- and FiO₂-values.
+
+    Parameters
+    ----------
+    a : scalar id or 1-D int array of shape (T,)
+
+    Returns
+    -------
+    flow_mid  : np.ndarray, same shape as a   (L min⁻¹)
+    fio2_mid  : np.ndarray, same shape as a   (%)
+    """
+    a = np.asarray(a, dtype=int).ravel()
+    flow_idx   = a // N_FIO2
+    fio2_idx   = a %  N_FIO2
+
+    flow_mid   = 0.5 * (FLOW_EDGES[flow_idx]   + FLOW_EDGES[flow_idx+1])
+    fio2_mid   = 0.5 * (FIO2_EDGES[fio2_idx]   + FIO2_EDGES[fio2_idx+1])
+    return flow_mid.reshape(a.shape), fio2_mid.reshape(a.shape)
 
 def train_spo2_dynamics(
     train_eps: Sequence["Episode"],
     n_actions: int,
     spo2_idx: int,
+    rox_idx: int, 
     cfg: DynConfig | None = None,
     obs_scaler: "obs_scaler" | None = None,  # type: ignore – d3rlpy obs scaler
+     # index of ROX in the observation vector (default 0)
 ):
     """Fit a one‑step predictor `SpO2_{t+1} = f(s_t, a_t)`.
 
@@ -69,18 +112,37 @@ def train_spo2_dynamics(
     X, y = [], []
     eye = np.eye(n_actions)
 
+
     for ep in train_eps:
-        s         = ep.observations[:-1]                # (T‑1, d)
-        a         = ep.actions[:-1].reshape(-1).astype(int)   # (T-1,)
-        next_spo2 = ep.observations[1:, spo2_idx]       # (T‑1,)
+        T = len(ep)
+        if T < 4:
+            print("too short")
+            continue                     # guard, though you filtered earlier
 
-        sa = np.hstack([s, eye[a]])                    # concat one‑hot action
+        s_tm2 = ep.observations[0:T-3]
+        s_tm1 = ep.observations[1:T-2]
+        s_t   = ep.observations[2:T-1]
+        a_t   = ep.actions[2:T-1].reshape(-1).astype(int)
+        y_tp1 = ep.observations[3:T, spo2_idx]
+
+        lag1_spo2 = s_tm1[:, spo2_idx]
+        lag2_spo2 = s_tm2[:, spo2_idx]
+        lag1_rox  = s_tm1[:, rox_idx]
+
+        sa = np.hstack([ s_t,
+                        eye[a_t],
+                        lag1_spo2[:, None],
+                        lag2_spo2[:, None],
+                        lag1_rox[:,  None] ])
+
         X.append(sa)
-        y.append(next_spo2)
+        y.append(y_tp1)
 
-    X = np.vstack(X)
-   
-    y = np.concatenate(y)
+    X = np.vstack(X)          # (N, d+12+3)
+    y = np.concatenate(y)     # (N,)
+    print("X rows:", X.shape[0], "y rows:", y.shape[0])  # should match
+
+
     row_idx = np.arange(len(X))   
     print("First 5 rows before split:", row_idx[:5])
     # --- train/validation split ---------------------------------------------
@@ -103,12 +165,12 @@ def train_spo2_dynamics(
     print("First 5 val-row  indices:", idx_va[:5])
 
 
-    mean  = obs_scaler.mean[spo2_idx]
-    scale = obs_scaler.std[spo2_idx]
-    yva_raw     = yva * scale + mean
-    pred_raw    = model.predict(Xva) * scale + mean
-    mae_raw     = mean_absolute_error(yva_raw, pred_raw)
-    print(f"[SpO2-Dyn] Hold-out MAE (raw units): {mae_raw:.2f} %")
+    # mean  = obs_scaler.mean[spo2_idx]
+    # scale = obs_scaler.std[spo2_idx]
+    # yva_raw     = yva * scale + mean
+    # pred_raw    = model.predict(Xva) * scale + mean
+    # mae_raw     = mean_absolute_error(yva_raw, pred_raw)
+    # print(f"[SpO2-Dyn] Hold-out MAE (raw units): {mae_raw:.2f} %")
 
     # quick sanity‑check
     mae = mean_absolute_error(yva, model.predict(Xva))
@@ -122,6 +184,22 @@ def train_spo2_dynamics(
 # ---------------------------------------------------------------------------
 # Public helper 2/2 – roll‑out an episode under CQL actions
 # ---------------------------------------------------------------------------
+
+def assemble_features(obs, act, spo2_idx, rox_idx, eye):
+    if act.ndim > 1:                      # ← NEW
+        act = act.reshape(-1)             # ← NEW  make it 1-D
+
+    lag2_spo2 = obs[0:-3, spo2_idx]
+    lag1_spo2 = obs[1:-2, spo2_idx]
+    lag1_rox  = obs[1:-2, rox_idx]
+    s_t       = obs[2:-1]
+    a_t       = act[2:-1]
+
+    return np.hstack([s_t,
+                      eye[a_t],
+                      lag1_spo2[:, None],
+                      lag2_spo2[:, None],
+                      lag1_rox[:,  None]])
 
 def rollout_cql_episode(
     ep: "Episode",
@@ -215,7 +293,9 @@ def plot_spo2_trajectories(
 
 def rollout_cql_episode_spo2_only(ep, cql_model, dyn_model,
                                   spo2_idx: int,
-                                  n_actions: int):
+                                  n_actions: int,
+                                  rox_idx: int,):
+
     """
     Returns
     -------
@@ -229,21 +309,77 @@ def rollout_cql_episode_spo2_only(ep, cql_model, dyn_model,
     cql_act    = np.empty(T, dtype=int)
 
     spo2_cf[0] = state[spo2_idx]
-    cql_act[0] = -1                 # dummy action at t=0
+    cql_act[0] = cql_act[0] = int(cql_model.predict(state.reshape(1, -1))[0])              # dummy action at t=0
+
+    lag2 = state[spo2_idx]
+    lag1 = state[spo2_idx]          # both equal at t=0
 
     for t in range(1, T):
         a_id         = int(cql_model.predict(state.reshape(1, -1))[0])
         cql_act[t]   = a_id
-        sa           = np.hstack([state, eye[a_id]])
+        # sa           = np.hstack([state, eye[a_id]])
+        sa = np.hstack([ state, eye[a_id],
+                     lag1,   # SpO₂_{t-1}
+                     lag2,   # SpO₂_{t-2}
+                     state[rox_idx] ])  # ROX_{t-1} (from current state)
         next_spo2    = float(dyn_model.predict(sa.reshape(1, -1))[0])
 
         next_state             = ep.observations[t].copy()
         next_state[spo2_idx]   = next_spo2   # overwrite *only* SpO₂
         spo2_cf[t]             = next_spo2
+
+        lag2, lag1 = lag1, next_spo2            # shift buffer
         state                  = next_state
 
     return spo2_cf, cql_act
 
+# NEW 2 axises def plot_actions_and_spo2( 
+#         t,
+#         flow_c, fio2_c, flow_q, fio2_q,
+#         spo2_obs, spo2_pred_clin, spo2_pred_cql,
+#         title: str | None = None,
+#         save: str | None = None):
+#     """
+#     Panel-1 : Flow-rate (primary y) + FiO₂ (twin y), clinician vs CQL
+#     Panel-2 : Observed & predicted SpO₂
+#     """
+#     import matplotlib.pyplot as plt
+
+#     fig, (ax_par, ax_o2) = plt.subplots(
+#         2, 1, figsize=(12, 5),
+#         sharex=True, height_ratios=[1.4, 1.8])
+
+#     # -- panel 1: parameters --------------------------------------------
+#     ax_par.step(t, flow_c, c="red",  where="mid", label="Flow Clin")
+#     ax_par.step(t, flow_q, c="blue", where="mid", label="Flow CQL")
+#     ax_par.set_ylabel("Flow (L/min)")
+#     ax_par.grid(alpha=.3)
+
+#     ax_twin = ax_par.twinx()
+#     ax_twin.step(t, fio2_c, c="red",  where="mid", ls="--", label="FiO₂ Clin")
+#     ax_twin.step(t, fio2_q, c="blue", where="mid", ls="--", label="FiO₂ CQL")
+#     ax_twin.set_ylabel("FiO₂ (%)")
+
+#     # merged legend
+#     h1, l1 = ax_par.get_legend_handles_labels()
+#     h2, l2 = ax_twin.get_legend_handles_labels()
+#     ax_par.legend(h1 + h2, l1 + l2, frameon=False, loc="upper right")
+
+#     # -- panel 2: SpO₂ ---------------------------------------------------
+#     ax_o2.plot(t, spo2_obs,       c="grey",  label="Observed SpO₂")
+#     ax_o2.plot(t, spo2_pred_clin, c="red",   label="Pred SpO₂ (clin)")
+#     ax_o2.plot(t, spo2_pred_cql,  c="purple",ls="--", label="Pred SpO₂ (CQL)")
+#     ax_o2.axhspan(92, 96, color="green", alpha=.12)
+#     ax_o2.set_ylabel("SpO₂ (%)"); ax_o2.set_ylim(85, 100)
+#     ax_o2.set_xlabel("Episode step")
+#     ax_o2.legend(frameon=False); ax_o2.grid(alpha=.3)
+
+#     if title: fig.suptitle(title, y=1.02)
+#     plt.tight_layout()
+#     if save:
+#         plt.savefig(save, dpi=300)
+#     else:
+#         plt.show()
 
 def plot_actions_and_spo2(ep,
                           clin_act, cql_act,
@@ -259,7 +395,15 @@ def plot_actions_and_spo2(ep,
     # -- actions -----------------------------------------------------------
     ax_act.step(t, clin_act, where="mid", lw=2,          label="Clinician")
     ax_act.step(t, cql_act,  where="mid", lw=2, ls="--", label="CQL rollout")
-    ax_act.set_ylabel("Action ID"); ax_act.set_yticks(range(n_actions))
+    ax_act.set_ylabel("Action bin")
+    ax_act.set_yticks(range(n_actions))
+
+    # >>> ADD THESE TWO LINES <<<
+    from spo2_counterfactual import action_id_to_label          # ⟵ NEW
+    ax_act.set_yticklabels([action_id_to_label(i)               # ⟵ NEW
+                            for i in range(n_actions)],
+                           fontsize=8)
+
     ax_act.legend(frameon=False); ax_act.grid(alpha=.3)
 
     # -- SpO₂ --------------------------------------------------------------
@@ -277,7 +421,41 @@ def plot_actions_and_spo2(ep,
     if save:
         plt.savefig(save, dpi=300)
     else:
-        plt.show()    
+        plt.show()
+
+#OLD def plot_actions_and_spo2(ep,
+#                           clin_act, cql_act,
+#                           spo2_obs, spo2_pred_clin, spo2_pred_cql,
+#                           n_actions: int,
+#                           title: str | None = None,
+#                           save: str | None = None):
+#     """Two stacked panels: actions (top) and SpO₂ traces (bottom)."""
+#     t = np.arange(len(ep))
+#     fig, (ax_act, ax_o2) = plt.subplots(2, 1, figsize=(12, 5),
+#                                         sharex=True, height_ratios=[1, 1.6])
+
+#     # -- actions -----------------------------------------------------------
+#     ax_act.step(t, clin_act, where="mid", lw=2,          label="Clinician")
+#     ax_act.step(t, cql_act,  where="mid", lw=2, ls="--", label="CQL rollout")
+#     ax_act.set_ylabel("Action ID"); ax_act.set_yticks(range(n_actions))
+#     ax_act.legend(frameon=False); ax_act.grid(alpha=.3)
+
+#     # -- SpO₂ --------------------------------------------------------------
+#     ax_o2.plot(t, spo2_obs,       c="grey",  label="Observed SpO₂")
+#     ax_o2.plot(t, spo2_pred_clin, c="red",   label="Pred SpO₂ (clin)")
+#     ax_o2.plot(t, spo2_pred_cql,  c="purple",ls="--", label="Pred SpO₂ (CQL)")
+#     ax_o2.axhspan(92, 96, color="green", alpha=.1)
+#     ax_o2.set_ylabel("SpO₂ (%)"); ax_o2.set_ylim(85, 100)
+#     ax_o2.set_xlabel("Episode step")
+#     ax_o2.legend(frameon=False); ax_o2.grid(alpha=.3)
+
+#     if title:
+#         fig.suptitle(title, y=1.02)
+#     plt.tight_layout()
+#     if save:
+#         plt.savefig(save, dpi=300)
+#     else:
+#         plt.show()    
 
 
 __all__ = [
