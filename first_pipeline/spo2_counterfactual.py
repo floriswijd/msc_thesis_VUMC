@@ -15,6 +15,7 @@ from sklearn.ensemble import GradientBoostingRegressor
 from sklearn.metrics import mean_absolute_error, r2_score
 from sklearn.model_selection import train_test_split
 from typing import Tuple
+from xgboost import XGBRegressor
 
 
 # ---------------------------------------------------------------------------
@@ -24,13 +25,13 @@ from typing import Tuple
 class DynConfig:
     """Hyper‑parameters for the GradientBoostingRegressor dynamics model."""
 
-    n_estimators: int = 400
-    learning_rate: float = 0.05
-    max_depth: int = 5
+    n_estimators: int = 600
+    learning_rate: float = 0.1
+    max_depth: int = 4
     loss: str = "quantile"   # use "quantile" for 50‑th percentile (=median)
     alpha: float = 0.5        # target quantile when loss == "quantile"
     test_size: float = 0.2
-    random_state: int = 0
+    random_state: int = 2
 
 
 # ---------------------------------------------------------------------------
@@ -80,10 +81,10 @@ def train_spo2_dynamics(
     train_eps: Sequence["Episode"],
     n_actions: int,
     spo2_idx: int,
-    rox_idx: int, 
+    *,
     cfg: DynConfig | None = None,
     obs_scaler: "obs_scaler" | None = None,  # type: ignore – d3rlpy obs scaler
-     # index of ROX in the observation vector (default 0)
+    base_feat_idx: np.ndarray | None = None, # index of the first base feature in the observation vector (default 0)
 ):
     """Fit a one‑step predictor `SpO2_{t+1} = f(s_t, a_t)`.
 
@@ -108,6 +109,8 @@ def train_spo2_dynamics(
     if cfg is None:
         cfg = DynConfig()
 
+    
+
     # --- build feature matrix ------------------------------------------------
     X, y = [], []
     eye = np.eye(n_actions)
@@ -119,15 +122,15 @@ def train_spo2_dynamics(
             print("too short")
             continue                     # guard, though you filtered earlier
 
-        s_tm2 = ep.observations[0:T-3]
-        s_tm1 = ep.observations[1:T-2]
-        s_t   = ep.observations[2:T-1]
+        s_t = ep.observations[2:T-1][:, base_feat_idx]
+        s_tm1 = ep.observations[1:T-2][:, base_feat_idx]
+        s_tm2 = ep.observations[0:T-3][:, base_feat_idx]
         a_t   = ep.actions[2:T-1].reshape(-1).astype(int)
         y_tp1 = ep.observations[3:T, spo2_idx]
 
         lag1_spo2 = s_tm1[:, spo2_idx]
         lag2_spo2 = s_tm2[:, spo2_idx]
-        lag1_rox  = s_tm1[:, rox_idx]
+        # lag1_rox  = s_tm1[:, rox_idx]
 
         # sa = np.hstack([ s_t,
         #                 eye[a_t],
@@ -135,16 +138,16 @@ def train_spo2_dynamics(
         #                 lag2_spo2[:, None],
         #                 lag1_rox[:,  None] ])
         
-        flow_mid, fio2_mid = id_to_midpoints(a_t)
+        # flow_mid, fio2_mid = id_to_midpoints(a_t)
 
         sa = np.hstack([
                 s_t,
                 eye[a_t],                  # 12 sparse cols
-                flow_mid[:, None],         # 1 dense col  ← NEW
-                fio2_mid[:, None],         # 1 dense col  ← NEW
+                # flow_mid[:, None],         # 1 dense col  ← NEW
+                # fio2_mid[:, None],         # 1 dense col  ← NEW
                 lag1_spo2[:, None],
-                lag2_spo2[:, None],
-                lag1_rox[:, None]
+                lag2_spo2[:, None]
+                # lag1_rox[:, None]
         ])
 
 
@@ -163,15 +166,27 @@ def train_spo2_dynamics(
         X, y,row_idx,   test_size=cfg.test_size, random_state=cfg.random_state,shuffle=False,  #don't shuffle the data before training
     )
 
-    model = GradientBoostingRegressor(
-        n_estimators=cfg.n_estimators,
-        learning_rate=cfg.learning_rate,
-        max_depth=cfg.max_depth,
-        loss=cfg.loss,
-        alpha=cfg.alpha,
-        random_state=cfg.random_state,
+    # model = GradientBoostingRegressor(
+    #     n_estimators=cfg.n_estimators,
+    #     learning_rate=cfg.learning_rate,
+    #     max_depth=cfg.max_depth,
+    #     loss=cfg.loss,
+    #     alpha=cfg.alpha,
+    #     random_state=cfg.random_state,
   
-    )
+    # )
+    model = XGBRegressor(
+        n_estimators       = cfg.n_estimators,
+        learning_rate      = cfg.learning_rate,
+        max_depth          = cfg.max_depth,
+        subsample          = 0.8,
+        colsample_bytree   = 0.8,
+        objective          = "reg:squarederror",
+        random_state       = cfg.random_state,
+        n_jobs             = -1,
+        
+)
+
     model.fit(Xtr, ytr)
 
     print("First 5 train-row indices:", idx_tr[:5])
@@ -198,21 +213,21 @@ def train_spo2_dynamics(
 # Public helper 2/2 – roll‑out an episode under CQL actions
 # ---------------------------------------------------------------------------
 
-def assemble_features(obs, act, spo2_idx, rox_idx, eye):
+def assemble_features(obs, act, spo2_idx,  eye):
     if act.ndim > 1:                      # ← NEW
         act = act.reshape(-1)             # ← NEW  make it 1-D
 
     lag2_spo2 = obs[0:-3, spo2_idx]
     lag1_spo2 = obs[1:-2, spo2_idx]
-    lag1_rox  = obs[1:-2, rox_idx]
+    # lag1_rox  = obs[1:-2, rox_idx]
     s_t       = obs[2:-1]
     a_t       = act[2:-1]
 
     return np.hstack([s_t,
                       eye[a_t],
                       lag1_spo2[:, None],
-                      lag2_spo2[:, None],
-                      lag1_rox[:,  None]])
+                      lag2_spo2[:, None]]
+                      )
 
 def rollout_cql_episode(
     ep: "Episode",
@@ -398,35 +413,34 @@ def predict_spo2_one_step(obs,            # (T, d) recorded states
                           actions,        # (T,) int ids to use
                           dyn_model,
                           spo2_idx: int,
-                          rox_idx: int,
-                          n_actions: int):
+                          n_actions: int, 
+                          base_feat_idx: np.ndarray | None = None):
     """
     Return a length-T array of one-step SpO₂ predictions, conditioning
     on the *logged* state at every step (open-loop).
     """
     eye = np.eye(n_actions)
     # re-create the same feature matrix you trained on  (skip t<2 for lags)
-    s_t      = obs[2:-1]
+    s_t = obs[2:-1][:, base_feat_idx]
     a_t      = actions[2:-1].reshape(-1)
     lag1_spo2 = obs[1:-2, spo2_idx]
     lag2_spo2 = obs[0:-3, spo2_idx]
-    lag1_rox  = obs[1:-2, rox_idx]
+
 
     # X = np.hstack([s_t,
     #                eye[a_t],
     #                lag1_spo2[:, None],
     #                lag2_spo2[:, None],
     #                lag1_rox[:,  None]])
-    flow_mid, fio2_mid = id_to_midpoints(a_t)
+    # flow_mid, fio2_mid = id_to_midpoints(a_t)
 
     X = np.hstack([
                 s_t,
                 eye[a_t],                  # 12 sparse cols
-                flow_mid[:, None],         # 1 dense col  ← NEW
-                fio2_mid[:, None],         # 1 dense col  ← NEW
+                # flow_mid[:, None],         # 1 dense col  ← NEW
+                # fio2_mid[:, None],         # 1 dense col  ← NEW
                 lag1_spo2[:, None],
                 lag2_spo2[:, None],
-                lag1_rox[:, None]
         ])
 
 

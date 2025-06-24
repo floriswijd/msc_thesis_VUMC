@@ -288,9 +288,6 @@ def main():
 
         print("✅ Behavior Cloning model fitted successfully.")
 
-
-
-
     print("\n=== Initializing Enhanced Off-Policy Evaluation ===")
     from evaluator import BehaviorPolicyEstimator
     
@@ -306,22 +303,10 @@ def main():
 
 
     # --- Determine the latest d3rlpy log directory for saving evaluation outputs and analyzing training logs ---
-    # This logic is moved from its original position later in the script.
     latest_log_dir_for_outputs = None
-    # Original logic to find the specific timestamped run directory:
-    # Assumes args.logdir might be like "runs/cql", where "runs" is a subdir in d3rlpy_logs
-    # and "cql" is the prefix for the timestamped folder.
+
     logdir_path_obj = Path(args.logdir) # e.g., Path("runs/cql")
-    # search_parent_dir should be where timestamped folders like "cql_xxxx" reside.
-    # Based on user's example: /Users/floppie/Documents/Msc Scriptie/HFNC codebase/first_pipeline/d3rlpy_logs/runs/cql_20250524174450
-    # This implies base_d3rlpy_runs_dir = Path("d3rlpy_logs") / "runs" if args.logdir is "runs/cql"
-    # or more generally, Path("d3rlpy_logs") / logdir_path_obj.parent
-    
-    # The original script had: base_d3rlpy_runs_dir = Path("d3rlpy_logs") / "runs"
-    # Let's assume logdir_path_obj.parent correctly gives "runs" or similar if args.logdir is "runs/cql"
-    # If args.logdir is just "cql", then logdir_path_obj.parent is ".", so search_parent_dir becomes "d3rlpy_logs"
-    # The original code explicitly used Path("d3rlpy_logs") / "runs". We'll stick to that for base_d3rlpy_runs_dir
-    # as it matches the user's example path structure.
+
     base_d3rlpy_runs_dir_for_search = Path("d3rlpy_logs") / "runs"
     run_prefix_for_search = logdir_path_obj.name # e.g., "cql" if args.logdir is "runs/cql" or just "cql"
 
@@ -382,29 +367,70 @@ def main():
     df_val   = df[df["stay_id"].isin(val_stays)].copy()
     df_test  = df[df["stay_id"].isin(test_stays)].copy()
     state_cols = data_dict["state_columns"]      # <- exists here
+
+    DERIVED_COLS = {
+    "rox", "sf_ratio",
+    "rox_class_grey", "rox_class_high", "rox_class_low", "rox_class_nan"
+}
+    BASE_FEAT_IDX = np.array(
+    [i for i, name in enumerate(state_cols) if name not in DERIVED_COLS],
+    dtype=int,
+)
+    D_RAW = len(BASE_FEAT_IDX)      # number of kept raw features
+
     print("number of features:", len(state_cols))
     for i, col in enumerate(state_cols[:20]):    # first 20 just to keep output short
         print(f"{i:2d}: {col}")
 
     spo2_idx = state_cols.index("spo2")          # correct column for Episode.observations
     print("SpO₂ sits at column", spo2_idx)
-    rox_idx = state_cols.index("rox")          # correct column for Episode.observations
-    print("ROX sits at column", rox_idx)
-    print(f"{len(df_train):,} rows in train  |  "
-      f"{len(df_val):,} rows in val  |  "
-      f"{len(df_test):,} rows in test")
+    # rox_idx = state_cols.index("rox")          # correct column for Episode.observations
+    # print("ROX sits at column", rox_idx)
+    print(f"{len(train_eps):,} rows in train  |  "
+      f"{len(val_eps):,} rows in val  |  "
+      f"{len(test_eps):,} rows in test")
+    
     
     from spo2_counterfactual import train_spo2_dynamics, rollout_cql_episode_spo2_only, id_to_midpoints, plot_actions_and_spo2, assemble_features, predict_spo2_one_step
 
-
+    # model = XGBRegressor(
+    #         n_estimators   = 600,
+    #         learning_rate  = 0.03,
+    #         max_depth      = 5,
+    #         subsample      = 0.8,
+    #         colsample_bytree = 0.8,
+    #         objective      = "reg:squarederror",
+    #         random_state   = cfg.random_state,
+    #         n_jobs         = -1,
+    # )
     n_actions = cql.action_size           # 12
     dyn_model = train_spo2_dynamics(
         train_eps=train_eps + val_eps,              # only training episodes
         n_actions=n_actions,
         spo2_idx=spo2_idx,
-        rox_idx=rox_idx,  # Add ROX index for dynamics model
-        obs_scaler=scaler,  # use the same scaler as CQL
+        
+        # rox_idx=rox_idx,  # Add ROX index for dynamics model
+        # obs_scaler=scaler,  # use the same scaler as CQL
+        base_feat_idx = BASE_FEAT_IDX,
     )
+
+    def col_name(j: int) -> str:
+        if j < D_RAW:                                # raw vitals
+            return state_cols[BASE_FEAT_IDX[j]]
+        elif j < D_RAW + n_actions:                  # action one-hot columns
+            return f"act_{j - D_RAW}"
+        else:                                        # the two SpO₂ lags
+            return ["lag1_spo2", "lag2_spo2"][j - (D_RAW + n_actions)]
+        
+    fi = dyn_model.feature_importances_
+
+    top = fi.argsort()[::-1][:15]        # show 15 largest
+    print("Top-15 feature importances")
+    for j in top:
+        print(f"{col_name(j):>12s} : {fi[j]:.4f}")
+    imp_actions = fi[D_RAW : D_RAW + n_actions].sum()
+    print(f"Σ importance (all 12 action dummies) = {imp_actions:.4f}")
+# ---------------------------------------------------------------------
 
     # Prepare for counter-factual plotting
     eye     = np.eye(n_actions)
@@ -422,14 +448,18 @@ def main():
                     ep.observations,
                     ep.actions.reshape(-1),
                     dyn_model,
-                    spo2_idx, rox_idx, n_actions)
+                    spo2_idx,
+                    n_actions, 
+                    base_feat_idx = BASE_FEAT_IDX )
 
         cql_act  = cql.predict(ep.observations).astype(int)
         cql_pred = predict_spo2_one_step(
                     ep.observations,
                     cql_act,
                     dyn_model,
-                    spo2_idx, rox_idx, n_actions)
+                    spo2_idx,
+                    n_actions, 
+                    base_feat_idx = BASE_FEAT_IDX )
         
         # print("len(t)           =", len(t))
         # print("len(spo2_obs)    =", len(spo2_obs))
@@ -440,9 +470,13 @@ def main():
         print("Different-bin steps:", mask.sum(), "/", len(mask),
             f"({mask.mean()*100:.1f} %)")
 
-        # 2.  Feature importance of the 12 action columns
-        imp = dyn_model.feature_importances_
-        print("Sum importance action cols:", imp[36:48].sum())
+        # # 2.  Feature importance of the 12 action columns
+        # fi = dyn_model.feature_importances_
+        # print("Top-10 raw-feature importances:")
+        # for idx in fi.argsort()[::-1][:10]:
+        #     print(f"  {state_cols[BASE_FEAT_IDX[idx]]:>15s} : {fi[idx]:.4f}")
+        # print("Σ importance(flow/FIO₂ mid-points) =",
+        #     fi[D_RAW+n_actions : D_RAW+n_actions+2].sum())
 
         plot_actions_and_spo2(
             ep              = ep,                    # full episode
