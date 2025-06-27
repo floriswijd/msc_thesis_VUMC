@@ -120,7 +120,7 @@ def train_spo2_dynamics(
         T = len(ep)
         if T < 4:
             print("too short")
-            continue                     # guard, though you filtered earlier
+            continue                     # guard, though filtered earlier
 
         s_t = ep.observations[2:T-1][:, base_feat_idx]
         s_tm1 = ep.observations[1:T-2][:, base_feat_idx]
@@ -128,10 +128,19 @@ def train_spo2_dynamics(
         a_t   = ep.actions[2:T-1].reshape(-1).astype(int)
         y_tp1 = ep.observations[3:T, spo2_idx]
 
-        lag1_spo2 = s_tm1[:, spo2_idx]
-        lag2_spo2 = s_tm2[:, spo2_idx]
-        # lag1_rox  = s_tm1[:, rox_idx]
+        curr_spo2 = ep.observations[2:T-1, spo2_idx]          # SpO₂ₜ
+        next_spo2 = ep.observations[3:T,   spo2_idx]          # SpO₂ₜ₊₁
+        delta_spo2 = next_spo2 - curr_spo2                    #  ΔSpO₂
 
+        lag1_spo2 = ep.observations[1:T-2, spo2_idx]
+        lag2_spo2 = ep.observations[0:T-3, spo2_idx]
+        # lag1_rox  = s_tm1[:, rox_idx]
+        sa = np.hstack([s_t, eye[a_t],
+                        # lag1_spo2[:, None],
+                        # lag2_spo2[:, None]
+                        ])
+        X.append(sa)
+        y.append(delta_spo2)          #  <-- use ΔSpO₂ !
         # sa = np.hstack([ s_t,
         #                 eye[a_t],
         #                 lag1_spo2[:, None],
@@ -140,19 +149,19 @@ def train_spo2_dynamics(
         
         # flow_mid, fio2_mid = id_to_midpoints(a_t)
 
-        sa = np.hstack([
-                s_t,
-                eye[a_t],                  # 12 sparse cols
-                # flow_mid[:, None],         # 1 dense col  ← NEW
-                # fio2_mid[:, None],         # 1 dense col  ← NEW
-                lag1_spo2[:, None],
-                lag2_spo2[:, None]
-                # lag1_rox[:, None]
-        ])
+        # sa = np.hstack([
+        #         s_t,
+        #         eye[a_t],                  # 12 sparse cols
+        #         # flow_mid[:, None],         # 1 dense col  ← NEW
+        #         # fio2_mid[:, None],         # 1 dense col  ← NEW
+        #         lag1_spo2[:, None],
+        #         lag2_spo2[:, None]
+        #         # lag1_rox[:, None]
+        # ])
 
 
-        X.append(sa)
-        y.append(y_tp1)
+        # X.append(sa)
+        # y.append(y_tp1)
 
     X = np.vstack(X)          # (N, d+12+3)
     y = np.concatenate(y)     # (N,)
@@ -175,19 +184,29 @@ def train_spo2_dynamics(
     #     random_state=cfg.random_state,
   
     # )
+# AFTER ─ pass eval_metric at construction time
     model = XGBRegressor(
-        n_estimators       = cfg.n_estimators,
-        learning_rate      = cfg.learning_rate,
-        max_depth          = cfg.max_depth,
-        subsample          = 0.8,
-        colsample_bytree   = 0.8,
-        objective          = "reg:squarederror",
-        random_state       = cfg.random_state,
-        n_jobs             = -1,
-        
-)
+            # capacity / regularisation
+            n_estimators=2000,
+            learning_rate=0.02,
+            max_depth=6,
+            subsample=0.8,
+            colsample_bytree=0.9,
+            objective="reg:squarederror",
 
-    model.fit(Xtr, ytr)
+            # NEW: these two must be here on xgboost-3.x
+            eval_metric="mae",
+            early_stopping_rounds=100,
+
+            random_state=cfg.random_state,
+            n_jobs=-1,
+            tree_method="hist",        # optional speed-up
+    )
+
+    model.fit(Xtr, ytr,
+            eval_set=[(Xva, yva)],
+
+            verbose=False)
 
     print("First 5 train-row indices:", idx_tr[:5])
     print("First 5 val-row  indices:", idx_va[:5])
@@ -409,49 +428,81 @@ def rollout_cql_episode_spo2_only(ep, cql_model, dyn_model,
 #     else:
 #         plt.show()
 
-def predict_spo2_one_step(obs,            # (T, d) recorded states
-                          actions,        # (T,) int ids to use
-                          dyn_model,
-                          spo2_idx: int,
-                          n_actions: int, 
-                          base_feat_idx: np.ndarray | None = None):
-    """
-    Return a length-T array of one-step SpO₂ predictions, conditioning
-    on the *logged* state at every step (open-loop).
-    """
-    eye = np.eye(n_actions)
-    # re-create the same feature matrix you trained on  (skip t<2 for lags)
-    s_t = obs[2:-1][:, base_feat_idx]
-    a_t      = actions[2:-1].reshape(-1)
-    lag1_spo2 = obs[1:-2, spo2_idx]
-    lag2_spo2 = obs[0:-3, spo2_idx]
+def predict_spo2_one_step(obs, actions, dyn_model, *,
+                          spo2_idx, n_actions, base_feat_idx: np.ndarray):
+    eye   = np.eye(n_actions)
+    s_t   = obs[2:-1][:, base_feat_idx]
+    a_t   = actions[2:-1].astype(int)
+    lag1  = obs[1:-2, spo2_idx]
+    lag2  = obs[0:-3, spo2_idx]
 
+    X = np.hstack([s_t, eye[a_t],
+                #    lag1[:, None], lag2[:, None]
+                   ])
 
-    # X = np.hstack([s_t,
-    #                eye[a_t],
-    #                lag1_spo2[:, None],
-    #                lag2_spo2[:, None],
-    #                lag1_rox[:,  None]])
-    # flow_mid, fio2_mid = id_to_midpoints(a_t)
+    delta_pred = dyn_model.predict(X)              # ΔSpO₂̂
+    abs_pred   = obs[2:-1, spo2_idx] + delta_pred  # SpO₂̂ₜ₊₁
 
-    X = np.hstack([
-                s_t,
-                eye[a_t],                  # 12 sparse cols
-                # flow_mid[:, None],         # 1 dense col  ← NEW
-                # fio2_mid[:, None],         # 1 dense col  ← NEW
-                lag1_spo2[:, None],
-                lag2_spo2[:, None],
-        ])
+    # prepend the first two logged values so len==T
+    return np.r_[obs[:2, spo2_idx], abs_pred, abs_pred[-1]]
 
+def predict_until_diverge(
+        obs,                         # (T, D)  raw episode observations
+        logged_act,                  # (T,)    clinician actions
+        cql_model,                   # d3rlpy DiscreteCQL
+        dyn_model,                   # fitted XGBRegressor
+        *,
+        spo2_idx: int,
+        n_actions: int,
+        base_feat_idx: np.ndarray
+):
+    """Return two SpO2 trajectories: clinician-branch, CQL-branch.
+    Both use one-step (no feedback) until the first action mismatch."""
+    
+    T          = len(obs)
+    eye        = np.eye(n_actions)
+    spo2_clin  = obs[:, spo2_idx].astype(float).copy()
+    spo2_cql   = spo2_clin.copy()
 
-    pred = dyn_model.predict(X)  
-    # print("DEBUG one-step  X.shape =", X.shape)   # <-- add this line once
+    state_clin = obs[0].copy()
+    state_cql  = obs[0].copy()
+    diverged   = False
 
-    # prepend the first two logged values so length==T
-    # return np.r_[obs[:2, spo2_idx], dyn_model.predict(X)]
-    return np.r_[obs[:2, spo2_idx], pred, pred[-1]]
+    def _assemble(x_state, a_id):
+        s_t = x_state[base_feat_idx]          # D_RAW raw features
+        return np.hstack([s_t, eye[a_id]])    #  … + 12 one-hot columns
+    
+    for t in range(1, T):
+        # choose actions
+        act_clin = int(logged_act[t])
+        act_cql  = int(cql_model.predict(state_cql.reshape(1, -1))[0])
 
+        # build x for one-step prediction (same helper as before)
 
+        # ① clinician branch
+        delta_clin = dyn_model.predict(_assemble(state_clin, act_clin).reshape(1, -1))[0]
+        pred_clin  = spo2_clin[t-1] + delta_clin
+        # ② CQL branch
+        delta_cql  = dyn_model.predict(_assemble(state_cql, act_cql).reshape(1, -1))[0]
+        pred_cql   = spo2_cql[t-1] + delta_cql
+
+        # keep originals while actions match
+        if not diverged and act_clin != act_cql:
+            diverged = True
+
+        if diverged:
+            # write back separately
+            state_clin = obs[t].copy(); state_clin[spo2_idx] = pred_clin
+            state_cql  = obs[t].copy(); state_cql[spo2_idx]  = pred_cql
+        else:
+            # keep identical state (logged SpO2)
+            state_clin = obs[t].copy()
+            state_cql  = state_clin.copy()
+
+        spo2_clin[t] = pred_clin
+        spo2_cql[t]  = pred_cql
+
+    return spo2_clin, spo2_cql
 
 def plot_actions_and_spo2(ep,
                           clin_act, cql_act,

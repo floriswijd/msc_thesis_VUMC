@@ -112,7 +112,7 @@ def main():
         print("\n=== Splitting dataset by stay (preventing data leakage) ===")
         train_eps, val_eps, test_eps = dataset.split_dataset_by_stay(
             mdp_dataset_full,
-            test_size=0.3,
+            test_size=0.5,
             val_size=0.5,
             random_state=42
         )
@@ -391,18 +391,11 @@ def main():
       f"{len(test_eps):,} rows in test")
     
     
-    from spo2_counterfactual import train_spo2_dynamics, rollout_cql_episode_spo2_only, id_to_midpoints, plot_actions_and_spo2, assemble_features, predict_spo2_one_step
+    from spo2_counterfactual import train_spo2_dynamics, rollout_cql_episode_spo2_only, id_to_midpoints,\
+          plot_actions_and_spo2, assemble_features, predict_spo2_one_step,  predict_until_diverge
+      
 
-    # model = XGBRegressor(
-    #         n_estimators   = 600,
-    #         learning_rate  = 0.03,
-    #         max_depth      = 5,
-    #         subsample      = 0.8,
-    #         colsample_bytree = 0.8,
-    #         objective      = "reg:squarederror",
-    #         random_state   = cfg.random_state,
-    #         n_jobs         = -1,
-    # )
+
     n_actions = cql.action_size           # 12
     dyn_model = train_spo2_dynamics(
         train_eps=train_eps + val_eps,              # only training episodes
@@ -437,59 +430,90 @@ def main():
     out_dir = evaluation_results_save_dir / "counterfactual_plots"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-
-    for idx, ep in enumerate(test_eps[:10], start=1):
-        t = np.arange(len(ep))       
+    for idx, ep in enumerate(test_eps[:40], start=1):
         print("episode", idx)
+        t         = np.arange(len(ep))
+        spo2_obs  = ep.observations[:, spo2_idx]
 
-        spo2_obs = ep.observations[:, spo2_idx]
+        # actions
+        act_clin  = ep.actions.reshape(-1)
+        act_cql   = cql.predict(ep.observations).astype(int)
 
-        clin_pred = predict_spo2_one_step(
-                    ep.observations,
-                    ep.actions.reshape(-1),
-                    dyn_model,
-                    spo2_idx,
-                    n_actions, 
-                    base_feat_idx = BASE_FEAT_IDX )
-
-        cql_act  = cql.predict(ep.observations).astype(int)
-        cql_pred = predict_spo2_one_step(
-                    ep.observations,
-                    cql_act,
-                    dyn_model,
-                    spo2_idx,
-                    n_actions, 
-                    base_feat_idx = BASE_FEAT_IDX )
-        
-        # print("len(t)           =", len(t))
-        # print("len(spo2_obs)    =", len(spo2_obs))
-        # print("len(clin_pred)   =", len(clin_pred))
-        # print("len(cql_pred)    =", len(cql_pred))
-
-        mask = (cql_act != ep.actions.reshape(-1))
-        print("Different-bin steps:", mask.sum(), "/", len(mask),
-            f"({mask.mean()*100:.1f} %)")
-
-        # # 2.  Feature importance of the 12 action columns
-        # fi = dyn_model.feature_importances_
-        # print("Top-10 raw-feature importances:")
-        # for idx in fi.argsort()[::-1][:10]:
-        #     print(f"  {state_cols[BASE_FEAT_IDX[idx]]:>15s} : {fi[idx]:.4f}")
-        # print("Σ importance(flow/FIO₂ mid-points) =",
-        #     fi[D_RAW+n_actions : D_RAW+n_actions+2].sum())
+        # new feedback roll-out
+        pred_clin, pred_cql = predict_until_diverge(
+                ep.observations,
+                ep.actions.reshape(-1),
+                cql,                       # trained CQL policy
+                dyn_model,
+                spo2_idx      = spo2_idx,
+                n_actions     = n_actions,
+                base_feat_idx = BASE_FEAT_IDX)
 
         plot_actions_and_spo2(
-            ep              = ep,                    # full episode
-            clin_act        = ep.actions.reshape(-1),
-            cql_act         = cql_act,
+            ep              = ep,
+            clin_act        = act_clin,
+            cql_act         = act_cql,
             spo2_obs        = spo2_obs,
-            spo2_pred_clin  = clin_pred,
-            spo2_pred_cql   = cql_pred,
+            spo2_pred_clin  = pred_clin,
+            spo2_pred_cql   = pred_cql,
             n_actions       = n_actions,
-            title = f"Test episode {idx} – open-loop counter-factual",
-            save  = out_dir / f"test_ep{idx:02d}.png"
+            title=f"Test episode {idx} – feedback counter-factual",
+            save = out_dir / f"test_ep{idx:02d}.png"
         )
-        print("finished one")
+
+    
+    # for idx, ep in enumerate(test_eps[:40], start=1):
+    #     t = np.arange(len(ep))       
+    #     print("episode", idx)
+
+    #     spo2_obs = ep.observations[:, spo2_idx]
+
+    #     clin_pred = predict_spo2_one_step(
+    #                 ep.observations,
+    #                 ep.actions.reshape(-1),
+    #                 dyn_model,
+    #                 spo2_idx      = spo2_idx,
+    #                 n_actions     = n_actions,
+    #                 base_feat_idx = BASE_FEAT_IDX )
+
+    #     cql_act  = cql.predict(ep.observations).astype(int)
+    #     cql_pred = predict_spo2_one_step(
+    #                 ep.observations,
+    #                 cql_act,
+    #                 dyn_model,
+    #                 spo2_idx      = spo2_idx,
+    #                 n_actions     = n_actions,
+    #                 base_feat_idx = BASE_FEAT_IDX )
+        
+    #     # print("len(t)           =", len(t))
+    #     # print("len(spo2_obs)    =", len(spo2_obs))
+    #     # print("len(clin_pred)   =", len(clin_pred))
+    #     # print("len(cql_pred)    =", len(cql_pred))
+
+    #     mask = (cql_act != ep.actions.reshape(-1))
+    #     print("Different-bin steps:", mask.sum(), "/", len(mask),
+    #         f"({mask.mean()*100:.1f} %)")
+
+    #     # # 2.  Feature importance of the 12 action columns
+    #     # fi = dyn_model.feature_importances_
+    #     # print("Top-10 raw-feature importances:")
+    #     # for idx in fi.argsort()[::-1][:10]:
+    #     #     print(f"  {state_cols[BASE_FEAT_IDX[idx]]:>15s} : {fi[idx]:.4f}")
+    #     # print("Σ importance(flow/FIO₂ mid-points) =",
+    #     #     fi[D_RAW+n_actions : D_RAW+n_actions+2].sum())
+
+    #     plot_actions_and_spo2(
+    #         ep              = ep,                    # full episode
+    #         clin_act        = ep.actions.reshape(-1),
+    #         cql_act         = cql_act,
+    #         spo2_obs        = spo2_obs,
+    #         spo2_pred_clin  = clin_pred,
+    #         spo2_pred_cql   = cql_pred,
+    #         n_actions       = n_actions,
+    #         title = f"Test episode {idx} – open-loop counter-factual",
+    #         save  = out_dir / f"test_ep{idx:02d}.png"
+    #     )
+    #     print("finished one") - up till here
         
         # plot_actions_and_spo2(       t,
         # flow_c, fio2_c, flow_q, fio2_q,
