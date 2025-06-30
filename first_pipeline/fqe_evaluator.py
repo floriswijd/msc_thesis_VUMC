@@ -4,6 +4,7 @@ import numpy as np
 import d3rlpy
 from d3rlpy.ope import FQEConfig, DiscreteFQE
 from d3rlpy.metrics import InitialStateValueEstimationEvaluator
+from d3rlpy.algos import QLearningAlgoBase   # Fixed import for d3rlpy 2.
 from d3rlpy.dataset import create_infinite_replay_buffer
 from typing import List, Dict, Any
 
@@ -19,7 +20,7 @@ from typing import List, Dict, Any
 
 # Your original function, refactored to be standalone.
 def evaluate_policy_with_fqe(
-    policy_to_evaluate: d3rlpy.algos.AlgoBase,
+    policy_to_evaluate: d3rlpy.algos.QLearningAlgoBase,
     train_episodes: List[d3rlpy.dataset.Episode],
     test_episodes: List[d3rlpy.dataset.Episode],
     n_fqe_steps: int = 150_000,
@@ -71,7 +72,8 @@ def evaluate_policy_with_fqe(
     # 3. Evaluate the trained policy using the FQE model on the clean test data
     value_estimator = InitialStateValueEstimationEvaluator()
     test_buffer = create_infinite_replay_buffer(test_episodes)
-    point_estimate = value_estimator.evaluate(algo=fqe, dataset=test_buffer)
+    point_estimate = float(value_estimator(algo=fqe, dataset=test_buffer))
+  
     print(f"   ➜ Point estimate V̂ = {point_estimate:.3f}")
 
     # 4. Perform bootstrapping on the test set to get a 95% Confidence Interval
@@ -83,7 +85,7 @@ def evaluate_policy_with_fqe(
             # Create a bootstrap sample from the TEST episodes
             boot_eps = list(rng.choice(test_episodes, size=len(test_episodes), replace=True))
             boot_buffer = create_infinite_replay_buffer(boot_eps)
-            v_hat = value_estimator.evaluate(algo=fqe, dataset=boot_buffer)
+            v_hat = float(value_estimator(algo=fqe, dataset=boot_buffer))
             boot_values.append(v_hat)
 
         ci_low, ci_high = np.percentile(boot_values, [2.5, 97.5])
@@ -99,4 +101,42 @@ def evaluate_policy_with_fqe(
         "fqe_std_dev": float(ci_std) if ci_std is not None else None,
         "n_fqe_steps": int(n_fqe_steps),
         "n_bootstrap_samples": int(n_bootstrap_samples),
+    }
+
+def calculate_behavior_policy_value(
+    episodes: List[d3rlpy.dataset.Episode],
+    gamma: float
+) -> Dict[str, float]:
+    """
+    Calculates the value of the behavior policy using Monte Carlo evaluation.
+
+    This computes the average cumulative discounted reward achieved in the dataset,
+    serving as a baseline for the clinicians' performance.
+
+    Args:
+        episodes: A list of d3rlpy episodes to evaluate.
+        gamma: The discount factor, which must be the same as the one used
+               for training the agent.
+
+    Returns:
+        A dictionary with the mean, standard deviation, and standard error
+        of the discounted returns.
+    """
+    all_returns = []
+    for episode in episodes:
+        episode_return = 0.0
+        # Loop through rewards and apply discount factor
+        for i, reward in enumerate(episode.rewards):
+            episode_return += (gamma ** i) * reward
+        all_returns.append(episode_return)
+
+    mean_return = float(np.mean(all_returns))
+    std_dev = float(np.std(all_returns))
+    # Standard Error of the Mean is useful for comparing against the FQE CI
+    std_err = std_dev / np.sqrt(len(all_returns))
+
+    return {
+        "behavior_mean_return": mean_return,
+        "behavior_std_dev": std_dev,
+        "behavior_std_err": std_err,
     }

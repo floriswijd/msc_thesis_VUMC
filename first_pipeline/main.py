@@ -112,7 +112,7 @@ def main():
         print("\n=== Splitting dataset by stay (preventing data leakage) ===")
         train_eps, val_eps, test_eps = dataset.split_dataset_by_stay(
             mdp_dataset_full,
-            test_size=0.5,
+            test_size=0.2,
             val_size=0.5,
             random_state=42
         )
@@ -219,45 +219,58 @@ def main():
         batch_size=args.batch,
         experiment_name=args.logdir
     )
+    
+    from fqe_evaluator import calculate_behavior_policy_value, evaluate_policy_with_fqe
+
+    baseline_results = calculate_behavior_policy_value(
+        episodes=val_eps,  # Use the same test set for a fair comparison
+        gamma=args.gamma
+    )
+
+        # 2. Clinician Policy Results (from Monte Carlo)
+    baseline_est = baseline_results['behavior_mean_return']
+    baseline_std = baseline_results['behavior_std_err']
+    print(f"\n🧑‍⚕️ Clinician Policy (Behavior) Value:")
+    print(f"   • V(π_b) = {baseline_est:.4f} ± {baseline_std:.4f} (Mean ± SEM)")
 
 
+    print("\n=== Evaluating final policy with FQE ===")
+    try:
+        # Call the function you just added to evaluator.py
+        fqe_results = evaluate_policy_with_fqe(
+            policy_to_evaluate=cql,
+            train_episodes=train_eps,   # Use training data to train FQE
+            test_episodes=val_eps,     # Use test data to get the final score
+            gamma=args.gamma,
+            device=device
+        )
+
+        print("\n--- ✅ Final FQE Evaluation Results ---")
+        print(f"   • FQE Point Estimate: {fqe_results['fqe_point_estimate']:.4f}")
+        if fqe_results.get('fqe_ci_95'):
+            ci_low, ci_high = fqe_results['fqe_ci_95']
+            std_dev = fqe_results['fqe_std_dev']
+            print(f"   • 95% Confidence Interval: [{ci_low:.4f}, {ci_high:.4f}]")
+            print(f"   • Bootstrap Std Dev: {std_dev:.4f}")
+        
+        # You can now save these results to a file, log them, etc.
+        # For example: utils.save_results(fqe_results, paths['results_path'])
+    except Exception as e:
+        print(f"\n❌ An error occurred during FQE evaluation: {e}")
+        traceback.print_exc()
+    
     if errors:
         print("\\n⚠️ Training encountered errors, checking logs for diagnosis...")
         # Pass the corrected path to check_training_logs
         actual_d3rlpy_log_dir = Path("d3rlpy_logs") / args.logdir
         trainer.check_training_logs(actual_d3rlpy_log_dir)
 
-        # ADD THIS: Initialize Behavior Policy Estimator BEFORE training
-
-    # print("\n=== Fitting Behavior Policy Model (Behavior Cloning) ===")
-    # from d3rlpy.algos import DiscreteBC, DiscreteBCConfig
-    # # ADD THIS IMPORT
-    # from d3rlpy.dataset import create_infinite_replay_buffer
-
-    # # Configure and create the BC model
-    # bc_config = DiscreteBCConfig(learning_rate=1e-3)
-    # bc_model = DiscreteBC(config=bc_config, device=device, enable_ddp=False)
-    
-    # # --- THIS IS THE KEY FIX ---
-    # # Create a ReplayBuffer object for the training episodes.
-    # # The .fit() method needs this object, not a raw list.
-    # print(f"🔧 Creating replay buffer for BC model with {len(train_eps)} episodes...")
-    # bc_replay_buffer = create_infinite_replay_buffer(train_eps + val_eps)  # Combine train and validation episodes for BC training
-    # # ---------------------------
-
-    # # Train the BC model using n_steps
-    # bc_model.fit(
-    #     bc_replay_buffer,  # <--- Pass the ReplayBuffer object here
-    #     n_steps=100000,     # BC learns fast, 50k steps is often plenty
-    #     n_steps_per_epoch=1000,
-    #     show_progress=True
-    # )
 
   # --- THIS IS THE UPDATED SECTION ---
     print("\n=== Fitting or Loading Behavior Policy Model (Behavior Cloning) ===")
     from d3rlpy.algos import DiscreteBC, DiscreteBCConfig
     from d3rlpy.dataset import create_infinite_replay_buffer
-    import math
+
 
     if args.bc_model_path:
         # Load the pre-trained model
@@ -289,18 +302,6 @@ def main():
         print("✅ Behavior Cloning model fitted successfully.")
 
     print("\n=== Initializing Enhanced Off-Policy Evaluation ===")
-    from evaluator import BehaviorPolicyEstimator
-    
-    behavior_policy_estimator = BehaviorPolicyEstimator(n_actions=n_actions)
-    print("🔧 Fitting behavior policy on training episodes...")
-    behavior_policy_estimator.fit(train_eps)  # Fit on training data
-    print("\n=== Behaviour-policy validation ===")
-    # metrics_bp = BehaviorPolicyEstimator.evaluate_behaviour_model(
-    #     behavior_policy_estimator,
-    #     train_eps,                 # use a slice of training data
-    #     n_actions,
-    #     title="Train-split")
-
 
     # --- Determine the latest d3rlpy log directory for saving evaluation outputs and analyzing training logs ---
     latest_log_dir_for_outputs = None
@@ -343,13 +344,15 @@ def main():
     plot_subplots_version(str(latest_log_dir_for_outputs), 
                          save_path=str(latest_log_dir_for_outputs / "training_analysis_subplots.png"))
 
+
+    print("\\n===     QUIT()      ===")
+   
     print("\\n=== Evaluating model ===")
     # Use the new comprehensive evaluation framework
     from evaluator import CQLEvaluator
 
     from spo2_counterfactual import train_spo2_dynamics, rollout_cql_episode
 
-    ##Ff spo2 plotten
 
     def stay_of(ep):
         idx = ep.episode_id if hasattr(ep, "episode_id") else None
@@ -393,8 +396,6 @@ def main():
     
     from spo2_counterfactual import train_spo2_dynamics, rollout_cql_episode_spo2_only, id_to_midpoints,\
           plot_actions_and_spo2, assemble_features, predict_spo2_one_step,  predict_until_diverge
-      
-
 
     n_actions = cql.action_size           # 12
     dyn_model = train_spo2_dynamics(
@@ -537,6 +538,12 @@ def main():
         # plt.tight_layout()
         # plt.savefig(f"val_ep_{k:02d}_params.png", dpi=180)
         # plt.close(fig)
+        from evaluator import BehaviorPolicyEstimator
+        
+        behavior_policy_estimator = BehaviorPolicyEstimator(n_actions=n_actions)
+        print("🔧 Fitting behavior policy on training episodes...")
+        behavior_policy_estimator.fit(train_eps)  # Fit on training data
+        print("\n=== Behaviour-policy validation ===")
 
 
         cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
@@ -661,17 +668,17 @@ def main():
         print(f"\n🎯 Fitted Q Evaluation Results:")
         print(f"   FQE Estimate: {fqe['fqe_estimate']:.4f} ± {fqe['fqe_std']:.4f}")
 
-    fqe_metrics2 = cql_evaluator_obj.evaluate_fqe2(train_episodes=train_eps, test_episodes=test_eps,
-                                     n_steps = 150_000,
-                                     n_boot  = 200)
-    print("\n=== FQE summary2 ===")
-    print(fqe_metrics2)
+    # fqe_metrics2 = cql_evaluator_obj.evaluate_fqe2(train_episodes=train_eps, test_episodes=test_eps,
+    #                                  n_steps = 150_000,
+    #                                  n_boot  = 200)
+    # print("\n=== FQE summary2 ===")
+    # print(fqe_metrics2)
 
-    fqe_metrics = cql_evaluator_obj.evaluate_fqe(episodes=train_eps + val_eps,
-                                     n_steps = 150_000,
-                                     n_boot  = 200)
-    print("\n=== FQE summary ===")
-    print(fqe_metrics)
+    # fqe_metrics = cql_evaluator_obj.evaluate_fqe(episodes=train_eps + val_eps,
+    #                                  n_steps = 150_000,
+    #                                  n_boot  = 200)
+    # print("\n=== FQE summary ===")
+    # print(fqe_metrics)
     
     print(f"\\n📊 Academic visualizations and detailed report saved {save_location_message_suffix}")
     

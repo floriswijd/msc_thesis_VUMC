@@ -9,9 +9,10 @@ def train_model(model, train_episodes,val_episodes, n_epochs, batch_size, experi
     print("🚀  Starting training DiscreteCQL...")
     n_transitions = sum(len(ep.observations) for ep in train_episodes)
     print(f"Using dataset with {n_transitions} transitions for training")
-
+   
     # Calculate steps_per_epoch based on dataset size and batch size
-    steps_per_epoch = math.ceil(n_transitions / batch_size)
+    # steps_per_epoch = math.ceil(n_transitions / batch_size)
+    steps_per_epoch = 10000
     
     print(f"📊 Training configuration:")
     print(f"   Dataset size: {n_transitions} transitions")
