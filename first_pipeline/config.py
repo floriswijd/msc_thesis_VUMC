@@ -23,10 +23,10 @@ def parse_args():
                         help="-1 = CPU, >=0 = GPU device ID")
     parser.add_argument("--logdir", default="runs/cql",
                         help="Directory for logging and saving models")
-    parser.add_argument("--bc-model-path", type=str, default="/Users/floppie/Documents/Msc Scriptie/HFNC codebase/first_pipeline/d3rlpy_logs/DiscreteBC_20250616035123/model_100000.d3",
+    parser.add_argument("--bc-model-path", type=str, default="/Users/floppie/Documents/Msc Scriptie/HFNC codebase/first_pipeline/d3rlpy_logs/DiscreteBC_20250701220207/model_50000.d3", 
                         help="Path to a pre-trained Behavior Cloning model file (*.d3). If provided, training is skipped.")
     return parser.parse_args()
-
+#"/Users/floppie/Documents/Msc Scriptie/HFNC codebase/first_pipeline/d3rlpy_logs/DiscreteBC_20250616035123/model_100000.d3"
 def setup_paths(args):
     Path(args.logdir).mkdir(parents=True, exist_ok=True)
     paths = {

@@ -35,11 +35,12 @@ import evaluator   # Model evaluation
 import utils       # Utility functions for debugging and visualization
 from validator import CQLValidator      
 import numpy as np
+from collections import Counter
 
 def main():
     args = config.parse_args()
     paths = config.setup_paths(args)
-    
+    print(f"Available paths: {list(paths.keys())}")
     # Print alpha configuration
     print(f"\n🎛️  CQL Configuration:")
     print(f"   Alpha (conservatism weight): {args.alpha}")
@@ -139,6 +140,9 @@ def main():
             print("\n❌ Error: No training episodes after split. Exiting.")
             sys.exit(1)
 
+        train_eps = train_eps + val_eps # Combine training and validation episodes for training
+        val_eps = []  # Clear validation episodes to avoid double training
+
         # def inspect_episode(ep, idx=0):
         #     """Pretty-print the structure of one d3rlpy Episode object."""
         #     print(f"\nEpisode #{idx}")
@@ -223,7 +227,7 @@ def main():
     from fqe_evaluator import calculate_behavior_policy_value, evaluate_policy_with_fqe
 
     baseline_results = calculate_behavior_policy_value(
-        episodes=val_eps,  # Use the same test set for a fair comparison
+        episodes=test_eps,  # Use the same test set for a fair comparison
         gamma=args.gamma
     )
 
@@ -239,8 +243,8 @@ def main():
         # Call the function you just added to evaluator.py
         fqe_results = evaluate_policy_with_fqe(
             policy_to_evaluate=cql,
-            train_episodes=train_eps,   # Use training data to train FQE
-            test_episodes=val_eps,     # Use test data to get the final score
+            train_episodes=train_eps+test_eps,   # Use training data to train FQE
+            test_episodes=test_eps,     # Use test data to get the final score
             gamma=args.gamma,
             device=device
         )
@@ -281,7 +285,7 @@ def main():
             sys.exit(1)
     else:
         # Train a new model as before
-        bc_config = DiscreteBCConfig(learning_rate=1e-3)
+        bc_config = DiscreteBCConfig(learning_rate=1e-2, observation_scaler=scaler, gamma=args.gamma)
         bc_model = DiscreteBC(config=bc_config, device=device, enable_ddp=False)
         
         # --- THIS IS THE KEY FIX ---
@@ -294,12 +298,72 @@ def main():
         # Train the BC model using n_steps
         bc_model.fit(
             bc_replay_buffer,  # <--- Pass the ReplayBuffer object here
-            n_steps=100000,     # BC learns fast, 50k steps is often plenty
+            n_steps=50000,     # BC learns fast, 50k steps is often plenty
             n_steps_per_epoch=1000,
-            show_progress=True
+            show_progress=True,
         )
 
         print("✅ Behavior Cloning model fitted successfully.")
+
+
+    print("\n=== Evaluating BC Model Imitation Quality on Test Set ===")
+
+    # Check if there are test episodes to evaluate on
+    if not test_eps:
+        print("⚠️ No test episodes available to evaluate imitation quality.")
+    else:
+        total_agreements = 0
+        total_transitions = 0
+        all_predicted_actions = []
+        all_actual_actions = []
+
+        for episode in test_eps:
+            # Get the actions predicted by the BC model for all states in the episode
+            # The .predict() method directly gives the chosen action (argmax)
+            predicted_actions = bc_model.predict(episode.observations)
+            
+            # Get the actual actions taken by the clinicians in the episode
+            actual_actions = episode.actions.flatten()  # Ensure it's a 1D array
+            
+            # Store for later analysis (like the visualization in Method 2)
+            all_predicted_actions.extend(predicted_actions)
+            all_actual_actions.extend(actual_actions)
+
+            # Compare the predicted actions to the actual actions and count matches
+            agreements = np.sum(predicted_actions == actual_actions)
+            
+            total_agreements += agreements
+            total_transitions += len(episode)
+
+        # Calculate the overall agreement rate
+        if total_transitions > 0:
+            agreement_rate = total_agreements / total_transitions
+            print(f"📊 Action Agreement Rate: {agreement_rate:.4f}")
+            print(f"   The BC model chose the same action as the clinician {agreement_rate:.2%} of the time on the test set.")
+            print(f"   (Based on {total_agreements:,} agreements out of {total_transitions:,} total actions).")
+        else:
+            print("   No transitions in the test set to calculate agreement rate.")
+
+    if 'all_actual_actions' in locals() and all_actual_actions:
+
+# Use collections.Counter to get a dictionary-like count of each action
+        clinician_counts = Counter(all_actual_actions)
+        bc_model_counts = Counter(all_predicted_actions)
+
+        # Find all unique actions that were taken by either policy
+        all_action_ids = sorted(set(clinician_counts.keys()) | set(bc_model_counts.keys()))
+
+        # Print a clear, formatted header for the table
+        print(f"{'Action ID':<12} | {'Clinician Count':<18} | {'BC Model Count':<18}")
+        print("-" * 55)
+
+        # Loop through each action ID and print its count from both policies
+        for action_id in all_action_ids:
+            # .get(action_id, 0) safely gets the count, returning 0 if the action wasn't used
+            c_count = clinician_counts.get(action_id, 0)
+            b_count = bc_model_counts.get(action_id, 0)
+            print(f"{action_id:<12} | {c_count:<18} | {b_count:<18}")
+
 
     print("\n=== Initializing Enhanced Off-Policy Evaluation ===")
 
@@ -335,14 +399,14 @@ def main():
         save_location_message_suffix = "in their respective default directories ('evaluation_results/', 'clinical_validation/')"
         print(f"⚠️  Outputs will be saved {save_location_message_suffix} as the specific run directory was not identified.")
 
-
-    print("📊 Creating combined training analysis...")
-    from plot_training_result import plot_dual_axis_curves, plot_subplots_version
+    #OFF
+    # print("📊 Creating combined training analysis...")
+    # from plot_training_result import plot_dual_axis_curves, plot_subplots_version
     
-    plot_dual_axis_curves(str(latest_log_dir_for_outputs), 
-                         save_path=str(latest_log_dir_for_outputs / "training_analysis_dual.png"))
-    plot_subplots_version(str(latest_log_dir_for_outputs), 
-                         save_path=str(latest_log_dir_for_outputs / "training_analysis_subplots.png"))
+    # plot_dual_axis_curves(str(latest_log_dir_for_outputs), 
+    #                      save_path=str(latest_log_dir_for_outputs / "training_analysis_dual.png"))
+    # plot_subplots_version(str(latest_log_dir_for_outputs), 
+    #                      save_path=str(latest_log_dir_for_outputs / "training_analysis_subplots.png"))
 
 
     print("\\n===     QUIT()      ===")
@@ -393,7 +457,24 @@ def main():
       f"{len(val_eps):,} rows in val  |  "
       f"{len(test_eps):,} rows in test")
     
-    
+    print("\n🧮 Calculating Q-value bounds...")
+    r_max = np.max(data_dict["rewards"])
+    r_min = np.min(data_dict["rewards"])
+    gamma = args.gamma
+    T_max = max(len(ep.rewards) for ep in train_eps)
+    print(f"   Longest episode in training data (T_max): {T_max} steps")
+    q_max_infinite = r_max / (1 - gamma)
+    q_min_infinite = r_min / (1 - gamma)
+    # Finite Horizon / Practical Bounds (for over-optimism check)
+    q_max_practical = r_max * (1 - gamma**T_max) / (1 - gamma)
+    q_min_practical = r_min * (1 - gamma**T_max) / (1 - gamma)
+    print(f"   Reward Range: [{r_min:.3f}, {r_max:.3f}]")
+    print(f"   Gamma: {gamma}")
+    print(f"   Infinite Theoretical Q-Range (for ERROR): [{q_min_infinite:.3f}, {q_max_infinite:.3f}]")
+    print(f"   Practical Q-Range based on T_max (for WARNING): [{q_min_practical:.3f}, {q_max_practical:.3f}]")
+
+
+
     from spo2_counterfactual import train_spo2_dynamics, rollout_cql_episode_spo2_only, id_to_midpoints,\
           plot_actions_and_spo2, assemble_features, predict_spo2_one_step,  predict_until_diverge
 
@@ -461,92 +542,15 @@ def main():
             title=f"Test episode {idx} – feedback counter-factual",
             save = out_dir / f"test_ep{idx:02d}.png"
         )
-
-    
-    # for idx, ep in enumerate(test_eps[:40], start=1):
-    #     t = np.arange(len(ep))       
-    #     print("episode", idx)
-
-    #     spo2_obs = ep.observations[:, spo2_idx]
-
-    #     clin_pred = predict_spo2_one_step(
-    #                 ep.observations,
-    #                 ep.actions.reshape(-1),
-    #                 dyn_model,
-    #                 spo2_idx      = spo2_idx,
-    #                 n_actions     = n_actions,
-    #                 base_feat_idx = BASE_FEAT_IDX )
-
-    #     cql_act  = cql.predict(ep.observations).astype(int)
-    #     cql_pred = predict_spo2_one_step(
-    #                 ep.observations,
-    #                 cql_act,
-    #                 dyn_model,
-    #                 spo2_idx      = spo2_idx,
-    #                 n_actions     = n_actions,
-    #                 base_feat_idx = BASE_FEAT_IDX )
-        
-    #     # print("len(t)           =", len(t))
-    #     # print("len(spo2_obs)    =", len(spo2_obs))
-    #     # print("len(clin_pred)   =", len(clin_pred))
-    #     # print("len(cql_pred)    =", len(cql_pred))
-
-    #     mask = (cql_act != ep.actions.reshape(-1))
-    #     print("Different-bin steps:", mask.sum(), "/", len(mask),
-    #         f"({mask.mean()*100:.1f} %)")
-
-    #     # # 2.  Feature importance of the 12 action columns
-    #     # fi = dyn_model.feature_importances_
-    #     # print("Top-10 raw-feature importances:")
-    #     # for idx in fi.argsort()[::-1][:10]:
-    #     #     print(f"  {state_cols[BASE_FEAT_IDX[idx]]:>15s} : {fi[idx]:.4f}")
-    #     # print("Σ importance(flow/FIO₂ mid-points) =",
-    #     #     fi[D_RAW+n_actions : D_RAW+n_actions+2].sum())
-
-    #     plot_actions_and_spo2(
-    #         ep              = ep,                    # full episode
-    #         clin_act        = ep.actions.reshape(-1),
-    #         cql_act         = cql_act,
-    #         spo2_obs        = spo2_obs,
-    #         spo2_pred_clin  = clin_pred,
-    #         spo2_pred_cql   = cql_pred,
-    #         n_actions       = n_actions,
-    #         title = f"Test episode {idx} – open-loop counter-factual",
-    #         save  = out_dir / f"test_ep{idx:02d}.png"
-    #     )
-    #     print("finished one") - up till here
-        
-        # plot_actions_and_spo2(       t,
-        # flow_c, fio2_c, flow_q, fio2_q,
-        # spo2_obs, spo2_pred_clin, spo2_cf,
-        # title = f"Validation Episode {k}",
-        # save  = out_dir / f"val_ep{k:02d}_params_spo2.png")
-    
-
-        # ---- extra figure with physical parameters ------------------
-        # import matplotlib.pyplot as plt
-        # fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(11,3), sharex=True)
-        # ax1.step(t, flow_c, c='r', where='mid', label='Clinician')
-        # ax1.step(t, flow_q, c='b', where='mid', label='CQL')
-        # ax1.set_ylabel("Flow (L min⁻¹)"); ax1.legend(); ax1.grid(alpha=.3)
-
-        # ax2.step(t, fio2_c, c='r', where='mid', label='Clinician')
-        # ax2.step(t, fio2_q, c='b', where='mid', label='CQL')
-        # ax2.set_ylabel("FiO₂ (%)"); ax2.legend(); ax2.grid(alpha=.3)
-
-        # plt.suptitle(f"Val ep {k} — parameter mid-points")
-        # plt.tight_layout()
-        # plt.savefig(f"val_ep_{k:02d}_params.png", dpi=180)
-        # plt.close(fig)
+        #OFF
         from evaluator import BehaviorPolicyEstimator
         
-        behavior_policy_estimator = BehaviorPolicyEstimator(n_actions=n_actions)
+        behavior_policy_estimator_old = BehaviorPolicyEstimator(n_actions=n_actions)
         print("🔧 Fitting behavior policy on training episodes...")
-        behavior_policy_estimator.fit(train_eps)  # Fit on training data
-        print("\n=== Behaviour-policy validation ===")
+        behavior_policy_estimator_old.fit(train_eps)  # Fit on training data
+        print("\n=== Behaviour-policy validation old")
 
-
-        cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator) # Renamed instance
+        cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator_old) # Renamed instance
     
     # scope_rl_metrics = cql_evaluator_obj.evaluate_ope_with_scope_rl(
     #     cql_model=cql,
@@ -555,20 +559,20 @@ def main():
     #     gamma=args.gamma
     # )
     # print("DR =", CQLEvaluator.doubly_robust_value(test_eps, bc_model, cql))
-    def filter_long_episodes(episodes, max_len=None, pct=75):
-        """Return two lists: kept, dropped."""
-        lengths = np.array([len(ep.actions) for ep in episodes])
+    # def filter_long_episodes(episodes, max_len=None, pct=75):
+    #     """Return two lists: kept, dropped."""
+    #     lengths = np.array([len(ep.actions) for ep in episodes])
 
-        if max_len is None:
-            max_len = int(np.percentile(lengths, pct))   # keep up to 95-th percentile
+    #     if max_len is None:
+    #         max_len = int(np.percentile(lengths, pct))   # keep up to 95-th percentile
 
-        kept    = [ep for ep, L in zip(episodes, lengths) if L <= max_len]
-        dropped = [ep for ep, L in zip(episodes, lengths) if L >  max_len]
-        print(f"[INFO] filtering episodes longer than {max_len} steps:"
-            f"  kept {len(kept)}, dropped {len(dropped)}")
-        return kept, dropped
+    #     kept    = [ep for ep, L in zip(episodes, lengths) if L <= max_len]
+    #     dropped = [ep for ep, L in zip(episodes, lengths) if L >  max_len]
+    #     print(f"[INFO] filtering episodes longer than {max_len} steps:"
+    #         f"  kept {len(kept)}, dropped {len(dropped)}")
+    #     return kept, dropped
 
-    kept, dropped = filter_long_episodes(test_eps, max_len=None, pct=85)
+    # kept, dropped = filter_long_episodes(test_eps, max_len=None, pct=85)
 
     # scope_rl_metrics = cql_evaluator_obj.evaluate_ope_with_scope_rl(
     #     cql_model=cql,
@@ -576,17 +580,17 @@ def main():
     #     test_episodes=test_eps,
     #     gamma=args.gamma
     # )
-    print("sndr =", CQLEvaluator.doubly_robust_value(kept, bc_model, cql))
+    print("sndr =", CQLEvaluator.doubly_robust_value(test_eps, bc_model, cql))
 
 
     pt, lo, hi = CQLEvaluator.bootstrap_sndr_value(
-        kept,
+        test_eps,
         behavior_algo = bc_model,
         eval_algo     = cql,
         gamma         = 0.99,
         seed          = 0,
-        n_boot        = 1,
-        alpha         = 0.05,
+        n_boot        = 5,
+        alpha         = 0.001,
     )
     print(f"SN-DR = {pt:.4f}")
     print(f"95% CI = [{lo:.4f}, {hi:.4f}]")
@@ -780,7 +784,7 @@ def main():
 
         # 2) model decision analysis
         print("Running model behavior validation...")
-        model_result = validator.validate_model_behavior(cql, test_eps)
+        model_result = validator.validate_model_behavior(cql, train_eps)
         if not model_result["passed"]:
             print(f"❌ Model behavior issues found: {model_result['errors']}")
         if model_result["warnings"]:

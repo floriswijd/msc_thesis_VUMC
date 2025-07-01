@@ -206,7 +206,7 @@ class CQLValidator:
         pred_errors = 0
 
         for episode in test_episodes[: max_episodes or len(test_episodes)]:
-            for obs in episode.observations[:10]:  # take first 10 steps per ep
+            for obs in episode.observations[:40]:  # take first 10 steps per ep
                 try:
                     action = int(model.predict(obs.reshape(1, -1))[0])
                     if 0 <= action < 12:
@@ -222,6 +222,7 @@ class CQLValidator:
 
         # --- analyse action dist -----------------------------------------
         if action_prefs.sum():
+            print("CHecking Action distribution")
             dist = action_prefs / action_prefs.sum()
             stats["predicted_action_distribution"] = dist.tolist()
             if dist.max() > 0.8:
@@ -239,6 +240,7 @@ class CQLValidator:
                 "mean": float(q_stack.mean()),
                 "std": float(q_stack.std()),
             }
+            print(f"Q‑value stats: {q_stats}")
             stats["q_value_stats"] = q_stats
             if abs(q_stats["max"]) > 1e3 or abs(q_stats["min"]) > 1e3:
                 errors.append("Q‑value explosion (|Q| > 1e3)")

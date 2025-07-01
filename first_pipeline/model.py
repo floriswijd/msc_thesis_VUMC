@@ -18,7 +18,7 @@ def create_cql_config(batch_size, learning_rate, gamma, alpha, scaler=None):
         learning_rate=learning_rate,
         gamma=gamma,
         alpha=alpha,
-        n_critics=3,
+        n_critics=2,
     )
     if scaler is not None:
         config.observation_scaler = scaler

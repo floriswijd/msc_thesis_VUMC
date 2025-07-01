@@ -229,46 +229,6 @@ class CQLEvaluator:
 
 
 
-    # def _dr_single_episode(ep, pi_b, pi_e, q_func, gamma=0.99):
-    #     s = ep.observations               # (T , 36)
-    #     a = ep.actions.reshape(-1)        # (T,)
-    #     r = ep.rewards.reshape(-1)
-
-    #     # behaviour probs and evaluation distribution
-    #     p_b = pi_b.calc_pscore_given_action(s, a)
-    #     dist = pi_e.calc_action_choice_probability(s)      # (T , 12)
-
-    #     # Q(s,a) for *all* 12 actions
-    #     q_hat = np.stack([q_func.predict_value(s, np.full(len(s), act))
-    #                     for act in range(pi_e.n_actions)], axis=1)
-
-    #     return DoublyRobust().estimate_policy_value(
-    #                 step_per_trajectory = len(a),
-    #                 action              = a,
-    #                 reward              = r,
-    #                 pscore              = p_b,
-    #                 evaluation_policy_action_dist = dist,
-    #                 state_action_value_prediction  = q_hat,
-    #                 gamma               = gamma,
-    #         )
-
-    # def doubly_robust_value_varlen(episodes, bc_model, cql_model, gamma=0.99, seed=0):
-    #     # wrap policies exactly as before
-    #     behavior_algo = bc_model[0] if isinstance(bc_model, (list, tuple)) else bc_model
-    #     pi_b = EpsilonGreedyHead(behavior_algo,  n_actions=behavior_algo.action_size,
-    #                             epsilon=0.05, name="behavior", random_state=seed)
-    #     pi_e = SoftmaxHead    (cql_model,  n_actions=cql_model.action_size,
-    #                             tau=1.0,   name="target",   random_state=seed)
-
-    #     # use the fitted FQE (already trained in your pipeline)
-    #     q_func = cql_model     # CQL exposes predict_value
-
-    #     dr_vals = [ CQLEvaluator._dr_single_episode(ep, pi_b, pi_e, q_func, gamma)
-    #                 for ep in episodes ]
-    #     return float(np.mean(dr_vals))
-
-
-
     def episodes_to_logged_dataset(episodes: list[Episode],
                                pi_b: EpsilonGreedyHead):
         """
@@ -392,58 +352,22 @@ class CQLEvaluator:
 
         prep = CreateOPEInput(env=None, gamma=0.99)   # env=None is OK
         input_dict = prep.obtain_whole_inputs(
-            logged_dataset      = logged_dataset,     # your dict
+            logged_dataset      = logged_dataset,     
             evaluation_policies = [pi_e],
             behavior_policy_name= pi_b.name,
             require_value_prediction = True,          # FQE will infer shapes from dataset
             random_state        = 0,
+            # gamma              = gamma,
         )
         eval_blk = input_dict[pi_e.name]
 
         q_hat = eval_blk["state_action_value_prediction"]
         dist  = eval_blk["evaluation_policy_action_dist"]
-        # w = dist[np.arange(len(logged_dataset["action"])), logged_dataset["action"]] / logged_dataset["pscore"]
-        # print("[DBG]  weight  max:", w.max(), "   inf:", np.isinf(w).sum())
 
-        # print("[DBG] Q-hat  NaN:", np.isnan(q_hat).any(),
-        #     "Inf:", np.isinf(q_hat).any())
-        # print("       action-dist NaN:", np.isnan(dist).any(),
-        #     "Inf:", np.isinf(dist).any())
-
-        # print("       q_hat shape", q_hat.shape,
-        #     "dist shape", dist.shape)
-        # start = 0
-        # T = logged_dataset["step_per_trajectory"]
-        # ratios = dist[start:start+T, :][
-        #             np.arange(T),
-        #             logged_dataset["action"][start:start+T]
-        #         ] / logged_dataset["pscore"][start:start+T]
-
-        # cum = np.cumprod(ratios)
-        # print("[DBG] cumulative weight max:", cum[np.isfinite(cum)].max(),
-        #     "   any inf:", np.isinf(cum).any())
-        
-        # from collections import Counter
-        # import sklearn.metrics
-        # from sklearn.metrics import confusion_matrix
-        
-        # print(Counter(logged_dataset["action"]))
-
-        # --- 2.  Distribution of predicted p-scores -----------------------
-        # ps = logged_dataset["pscore"]
-        # plt.hist(ps, bins=np.logspace(-8, 0, 60)); plt.xscale("log"); plt.show()
-
-        # # tail count
-        # print("below 1e-4:", (ps < 1e-4).sum())
-
-        # --- 3.  Confusion matrix between greedy BC action and clinician action
-        # greedy = behavior_algo.predict(logged_dataset["state"])
-        # cm = confusion_matrix(logged_dataset["action"], greedy)
-        # print(cm)
 
         ope = OffPolicyEvaluation(
             logged_dataset = logged_dataset,
-            ope_estimators = [SelfNormalizedDR(),DoublyRobust()]
+            ope_estimators = [SelfNormalizedDR(),DoublyRobust(), ]
         )
         values = ope.estimate_policy_value(input_dict)["target"]
         sndr_val = values["sndr"]
@@ -457,7 +381,7 @@ class CQLEvaluator:
         eval_algo,
         gamma: float = 0.99,
         seed: int = 42,
-        n_boot: int = 1,
+        n_boot: int = 2,
         alpha: float = 0.05,
     ) -> tuple[float, float, float]:
         """
@@ -1066,7 +990,7 @@ class CQLEvaluator:
                         q_values.append(float(q_val))
                 except:
                     continue
-        
+
         if q_values:
             plt.figure(figsize=(10, 6))
             plt.hist(q_values, bins=50, alpha=0.7, edgecolor='black')
