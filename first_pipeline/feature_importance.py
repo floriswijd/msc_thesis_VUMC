@@ -118,8 +118,8 @@ class CQLFeatureImportanceAnalyzer:
             print(f"📊 Q-function device: {next(q_func.parameters()).device}")
             
             # Enhanced sampling for better accuracy
-            sample_size = min(500, len(states))  # Increased from 100 to 500
-            background_size = min(200, len(states))  # Increased from 50 to 200
+            sample_size = min(1000, len(states))  # Increased from 100 to 500
+            background_size = min(400, len(states))  # Increased from 50 to 200
             
             # Ensure we have enough data for non-overlapping samples
             total_needed = sample_size + background_size

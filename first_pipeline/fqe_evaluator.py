@@ -24,7 +24,7 @@ def evaluate_policy_with_fqe(
     policy_to_evaluate: d3rlpy.algos.QLearningAlgoBase,
     train_episodes: List[d3rlpy.dataset.Episode],
     test_episodes: List[d3rlpy.dataset.Episode],
-    n_fqe_steps: int = 5000,
+    n_fqe_steps: int = 50000,
     n_bootstrap_samples: int = 200,
     gamma: float = 0.99,
     fqe_learning_rate: float = 3e-4,
@@ -67,7 +67,6 @@ def evaluate_policy_with_fqe(
         n_steps=n_fqe_steps,
         # No need for evaluators during the FQE training itself for this workflow
         show_progress=True,
-        save_interval=0
     )
     print("✅ FQE model training complete.")
 

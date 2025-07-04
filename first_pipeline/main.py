@@ -243,7 +243,7 @@ def main():
         # Call the function you just added to evaluator.py
         fqe_results = evaluate_policy_with_fqe(
             policy_to_evaluate=cql,
-            train_episodes=train_eps+test_eps,   # Use training data to train FQE
+            train_episodes=train_eps+test_eps,   # Use training data to train FQE Or whole dataset.
             test_episodes=test_eps,     # Use test data to get the final score
             gamma=args.gamma,
             device=device
@@ -446,7 +446,7 @@ def main():
     D_RAW = len(BASE_FEAT_IDX)      # number of kept raw features
 
     print("number of features:", len(state_cols))
-    for i, col in enumerate(state_cols[:20]):    # first 20 just to keep output short
+    for i, col in enumerate(state_cols[:2]):    # first 20 just to keep output short
         print(f"{i:2d}: {col}")
 
     spo2_idx = state_cols.index("spo2")          # correct column for Episode.observations
@@ -512,7 +512,7 @@ def main():
     out_dir = evaluation_results_save_dir / "counterfactual_plots"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for idx, ep in enumerate(test_eps[:40], start=1):
+    for idx, ep in enumerate(test_eps[:1], start=1):
         print("episode", idx)
         t         = np.arange(len(ep))
         spo2_obs  = ep.observations[:, spo2_idx]
@@ -545,12 +545,12 @@ def main():
         #OFF
         from evaluator import BehaviorPolicyEstimator
         
-        behavior_policy_estimator_old = BehaviorPolicyEstimator(n_actions=n_actions)
-        print("🔧 Fitting behavior policy on training episodes...")
-        behavior_policy_estimator_old.fit(train_eps)  # Fit on training data
-        print("\n=== Behaviour-policy validation old")
+    behavior_policy_estimator_old = BehaviorPolicyEstimator(n_actions=n_actions)
+    print("🔧 Fitting behavior policy on training episodes...")
+    behavior_policy_estimator_old.fit(train_eps)  # Fit on training data
+    print("\n=== Behaviour-policy validation old")
 
-        cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator_old) # Renamed instance
+    cql_evaluator_obj = CQLEvaluator(cql,  n_actions=n_actions,  behavior_policy_estimator=behavior_policy_estimator_old) # Renamed instance
     
     # scope_rl_metrics = cql_evaluator_obj.evaluate_ope_with_scope_rl(
     #     cql_model=cql,
@@ -559,20 +559,20 @@ def main():
     #     gamma=args.gamma
     # )
     # print("DR =", CQLEvaluator.doubly_robust_value(test_eps, bc_model, cql))
-    # def filter_long_episodes(episodes, max_len=None, pct=75):
-    #     """Return two lists: kept, dropped."""
-    #     lengths = np.array([len(ep.actions) for ep in episodes])
+    def filter_long_episodes(episodes, max_len=None, pct=75):
+        """Return two lists: kept, dropped."""
+        lengths = np.array([len(ep.actions) for ep in episodes])
 
-    #     if max_len is None:
-    #         max_len = int(np.percentile(lengths, pct))   # keep up to 95-th percentile
+        if max_len is None:
+            max_len = int(np.percentile(lengths, pct))   # keep up to 95-th percentile
 
-    #     kept    = [ep for ep, L in zip(episodes, lengths) if L <= max_len]
-    #     dropped = [ep for ep, L in zip(episodes, lengths) if L >  max_len]
-    #     print(f"[INFO] filtering episodes longer than {max_len} steps:"
-    #         f"  kept {len(kept)}, dropped {len(dropped)}")
-    #     return kept, dropped
+        kept    = [ep for ep, L in zip(episodes, lengths) if L <= max_len]
+        dropped = [ep for ep, L in zip(episodes, lengths) if L >  max_len]
+        print(f"[INFO] filtering episodes longer than {max_len} steps:"
+            f"  kept {len(kept)}, dropped {len(dropped)}")
+        return kept, dropped
 
-    # kept, dropped = filter_long_episodes(test_eps, max_len=None, pct=85)
+    kept, dropped = filter_long_episodes(test_eps, max_len=None, pct=75)
 
     # scope_rl_metrics = cql_evaluator_obj.evaluate_ope_with_scope_rl(
     #     cql_model=cql,
@@ -580,7 +580,10 @@ def main():
     #     test_episodes=test_eps,
     #     gamma=args.gamma
     # )
-    print("sndr =", CQLEvaluator.doubly_robust_value(test_eps, bc_model, cql))
+
+    sndr,dr = CQLEvaluator.doubly_robust_value(kept, bc_model, cql)
+    print(f"DR = {dr:.4f} (SN-DR = {sndr:.4f})")
+    # print("Dr", = CQLEvaluator.doubly_robust_value(test_eps, bc_model, cql))
 
 
     pt, lo, hi = CQLEvaluator.bootstrap_sndr_value(

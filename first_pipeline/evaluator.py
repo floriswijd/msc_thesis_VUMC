@@ -1012,7 +1012,7 @@ class CQLEvaluator:
         n_fio2 = len(fio2_edges) - 1
         n_flow = len(flow_edges) - 1
 
-        # 2) collect actions
+        # 2) collect actions and create matrices (your existing code)
         model_actions = []
         clinician_actions = []
         for ep in test_episodes:
@@ -1025,22 +1025,65 @@ class CQLEvaluator:
                     clinician_actions.append(ca)
                 except:
                     continue
-
-        # 3) bin into 2D mats
-        model_counts     = np.bincount(model_actions,     minlength=n_fio2 * n_flow)
-        clinician_counts = np.bincount(clinician_actions, minlength=n_fio2 * n_flow)
-        model_mat     = model_counts.reshape(n_fio2, n_flow)
-        clinician_mat = clinician_counts.reshape(n_fio2, n_flow)
+        # DEBUG: Check action range and distribution
+        print(f"\nDEBUG Action ranges:")
+        print(f"Clinician actions: min={min(clinician_actions)}, max={max(clinician_actions)}")
+        print(f"Model actions: min={min(model_actions)}, max={max(model_actions)}")
+        print(f"Expected action range: 0 to {n_fio2 * n_flow - 1}")
+        
+        # DEBUG: Check specific action 0 occurrences
+        action_0_count = clinician_actions.count(0)
+        print(f"Action 0 appears {action_0_count} times in test data")
+        # 3) bin into 2D mats - FIXED VERSION
+        # Create matrices with integer dtype
+        model_mat = np.zeros((n_fio2, n_flow), dtype=int)
+        clinician_mat = np.zeros((n_fio2, n_flow), dtype=int)
+    
+        # Count actions and place in correct matrix positions
+        model_action_counts = {}
+        clinician_action_counts = {}
+    
+        for action in model_actions:
+            model_action_counts[action] = model_action_counts.get(action, 0) + 1
+    
+        for action in clinician_actions:
+            clinician_action_counts[action] = clinician_action_counts.get(action, 0) + 1
+    
+        # Fill matrices using same logic as plot_bins.py
+        for action_id, count in model_action_counts.items():
+            flow_idx = action_id // n_fio2
+            fio2_idx = action_id % n_fio2
+            model_mat[fio2_idx, flow_idx] = int(count)  # Ensure integer
+    
+        for action_id, count in clinician_action_counts.items():
+            flow_idx = action_id // n_fio2
+            fio2_idx = action_id % n_fio2
+            clinician_mat[fio2_idx, flow_idx] = int(count)  # Ensure integer
 
         # 4) determine shared color‐scale
         vmin = min(model_mat.min(), clinician_mat.min())
         vmax = max(model_mat.max(), clinician_mat.max())
 
-        # 5) build axis labels
-        fio2_labels = [f"{fio2_edges[i]}–{fio2_edges[i+1]}" for i in range(n_fio2)]
-        flow_labels = [f"{flow_edges[j]}–{flow_edges[j+1]}" for j in range(n_flow)]
+        # 5) build axis labels - MATCH plot_bins.py style
+        flow_labels = []
+        for i in range(len(flow_edges)-1):
+            left = flow_edges[i]
+            right = flow_edges[i+1]
+            if i == len(flow_edges)-2:  # Last bin includes right edge
+                flow_labels.append(f"{left}–{right}")
+            else:
+                flow_labels.append(f"{left}–{right-1}")
 
-        # 6) plot side by side with seaborn heatmap + annotations
+        fio2_labels = []
+        for i in range(len(fio2_edges)-1):
+            fio2_min = fio2_edges[i]
+            if i == len(fio2_edges)-2:  # Last bin
+                fio2_max = 100  # Explicit max for FiO₂
+            else:
+                fio2_max = fio2_edges[i+1] - 1
+            fio2_labels.append(f"{fio2_min}–{fio2_max}")
+
+        # 6) Create plots (OUTSIDE any loops)
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
 
         sns.heatmap(

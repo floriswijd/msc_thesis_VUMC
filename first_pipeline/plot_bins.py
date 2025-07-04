@@ -93,22 +93,24 @@ for i, (bar, count) in enumerate(zip(bars1, action_counts)):
 # Plot 2: Heatmap showing flow vs FiO2 combinations
 flow_bins = len(flow_edges) - 1
 fio2_bins = len(fio2_edges) - 1
-heatmap_data = np.zeros((flow_bins, fio2_bins))
+# Change the dimensions to put FiO₂ on y-axis, flow on x-axis
+heatmap_data = np.zeros((fio2_bins, flow_bins))
 
 for action_id, count in counts.items():
     flow_idx = action_id // fio2_bins
     fio2_idx = action_id % fio2_bins
-    heatmap_data[flow_idx, fio2_idx] = count
+    # Flip the indexing: fio2_idx for rows (y), flow_idx for columns (x)
+    heatmap_data[fio2_idx, flow_idx] = count
 
 # Create flow and FiO2 labels from config with proper max values
 flow_labels = []
 for i in range(len(flow_edges)-1):
-    flow_min = flow_edges[i]
-    if i == len(flow_edges)-2:  # Last bin
-        flow_max = 70  # Explicit max for flow
+    left = flow_edges[i]
+    right = flow_edges[i+1]
+    if i == len(flow_edges)-2:  # Last bin includes right edge
+        flow_labels.append(f"{left}–{right}")
     else:
-        flow_max = flow_edges[i+1] - 1
-    flow_labels.append(f"{flow_min}–{flow_max}")
+        flow_labels.append(f"{left}–{right-1}")
 
 fio2_labels = []
 for i in range(len(fio2_edges)-1):
@@ -120,18 +122,21 @@ for i in range(len(fio2_edges)-1):
     fio2_labels.append(f"{fio2_min}–{fio2_max}")
 
 im = ax2.imshow(heatmap_data, cmap='viridis', aspect='auto')
-ax2.set_xlabel("FiO₂ Range (%)")
-ax2.set_ylabel("Flow Rate Range (L/min)")
-ax2.set_title("Action Frequency Heatmap: Flow Rate vs FiO₂")
-ax2.set_xticks(range(len(fio2_labels)))
-ax2.set_xticklabels(fio2_labels)
-ax2.set_yticks(range(len(flow_labels)))
-ax2.set_yticklabels(flow_labels)
+# Swap the axis labels
+ax2.set_xlabel("Flow Rate Range (L/min)")
+ax2.set_ylabel("FiO₂ Range (%)")
+ax2.set_title("Action Frequency Heatmap: FiO₂ vs Flow Rate")
+# Swap the tick labels
+ax2.set_xticks(range(len(flow_labels)))
+ax2.set_xticklabels(flow_labels)
+ax2.set_yticks(range(len(fio2_labels)))
+ax2.set_yticklabels(fio2_labels)
 
 # Add text annotations to heatmap
-for i in range(flow_bins):
-    for j in range(fio2_bins):
-        action_id = i * fio2_bins + j
+# Flip the loop order to match new dimensions
+for i in range(fio2_bins):  # i now represents FiO₂ (y-axis)
+    for j in range(flow_bins):  # j now represents flow (x-axis)
+        action_id = j * fio2_bins + i  # Adjust action_id calculation
         if action_id in counts:
             ax2.text(j, i, f'{int(heatmap_data[i, j])}', 
                     ha="center", va="center", color="white", fontweight='bold')
